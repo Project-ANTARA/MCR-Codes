@@ -39,8 +39,8 @@ def figures_path(*parts: str) -> Path:
 
 def init_orekit_data(download_if_missing: bool = False) -> Path:
     candidates = [
-        DATA_DIR / "orekit" / "orekit-data" / "orekit-data-main",
-        DATA_DIR / "orekit-data.zip",
+        PROJECT_ROOT / "orekit-data" / "orekit-data-main",
+        PROJECT_ROOT / "orekit-data.zip",
     ]
 
     for candidate in candidates:
