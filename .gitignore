@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# VSCode
+.vscode/
+
+# Generated simulation outputs
+results/
+
+# Orekit data
+data/orekit/
+data/orekit-data.zip
+
+# Logs
+*.log
+
+# Archives
+*.zip
