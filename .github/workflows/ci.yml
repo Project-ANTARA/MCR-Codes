@@ -11,68 +11,76 @@ on:
     # Weekly on Sundays at 3 AM UTC
     - cron: '0 3 * * 0'
 
-# Only run one workflow at a time for the same ref
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
-# Principle of least privilege for the default GITHUB_TOKEN
 permissions:
   contents: read
 
 env:
   PYTHON_VERSION: '3.11'
-  JAVA_VERSION: '11'
   PYTHONPATH: ${{ github.workspace }}/src
   MPLBACKEND: 'Agg'
 
 jobs:
   # ============================================================
-  # Smoke tests (every commit) - fast syntax/import checks
+  # Smoke tests (push / PR) - fast syntax and import checks
   # ============================================================
   smoke-test:
     name: Smoke Tests
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
     if: github.event_name != 'schedule'
+
+    defaults:
+      run:
+        shell: bash -el {0}
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
 
-      - name: Set up Python
-        uses: actions/setup-python@v7
+      - name: Set up ANTARA environment
+        uses: mamba-org/setup-micromamba@v3
         with:
-          python-version: ${{ env.PYTHON_VERSION }}
-          cache: 'pip'
+          environment-name: antara
+          create-args: >-
+            python=${{ env.PYTHON_VERSION }}
+            orekit
+            numpy
+            pandas
+            matplotlib
+            cartopy
+            shapely
+            scipy
+            skyfield
+            pytest
+            pip
+            -c conda-forge
 
-      - name: Set up Java
-        uses: actions/setup-java@v6
-        with:
-          distribution: 'temurin'
-          java-version: ${{ env.JAVA_VERSION }}
-
-      - name: Verify runtimes
+      - name: Verify environment
         run: |
+          which python
           python --version
-          pip --version
-          java -version
-          echo "JAVA_HOME=$JAVA_HOME"
-          echo "PYTHONPATH=$PYTHONPATH"
-
-      - name: Install Python dependencies
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install orekit numpy pandas matplotlib cartopy shapely scipy skyfield pytest
+          python -m pip --version
+          python - <<'PY'
+          import orekit
+          print("Orekit import OK")
+          print("Orekit module:", orekit.__file__)
+          PY
 
       - name: Set up Orekit data
         run: |
           python - <<'PY'
           import orekit
           orekit.initVM()
+
           from orekit.pyhelpers import download_orekit_data_curdir
           download_orekit_data_curdir()
-          print("Orekit data OK")
+
+          print("Orekit JVM initialized")
+          print("Orekit data downloaded")
           PY
 
       - name: Syntax check all src/*.py
@@ -91,7 +99,7 @@ jobs:
             echo "OK: $f"
           done
 
-      - name: Import test (fast)
+      - name: Import test
         run: |
           python - <<'PY'
           import orekit
@@ -117,41 +125,58 @@ jobs:
           PY
 
   # ============================================================
-  # Unit tests (every commit) - core module tests
+  # Unit tests (push / PR)
   # ============================================================
   unit-tests:
     name: Unit Tests
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 25
     needs: smoke-test
     if: github.event_name != 'schedule'
+
+    defaults:
+      run:
+        shell: bash -el {0}
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
 
-      - name: Set up Python
-        uses: actions/setup-python@v7
+      - name: Set up ANTARA environment
+        uses: mamba-org/setup-micromamba@v3
         with:
-          python-version: ${{ env.PYTHON_VERSION }}
-          cache: 'pip'
+          environment-name: antara
+          create-args: >-
+            python=${{ env.PYTHON_VERSION }}
+            orekit
+            numpy
+            pandas
+            matplotlib
+            cartopy
+            shapely
+            scipy
+            skyfield
+            pytest
+            pip
+            -c conda-forge
 
-      - name: Set up Java
-        uses: actions/setup-java@v6
-        with:
-          distribution: 'temurin'
-          java-version: ${{ env.JAVA_VERSION }}
-
-      - name: Install Python dependencies
+      - name: Set up Orekit data
         run: |
-          python -m pip install --upgrade pip
-          python -m pip install orekit numpy pandas matplotlib cartopy shapely scipy skyfield pytest
+          python - <<'PY'
+          import orekit
+          orekit.initVM()
+
+          from orekit.pyhelpers import download_orekit_data_curdir
+          download_orekit_data_curdir()
+
+          print("Orekit data OK")
+          PY
 
       - name: Run FSM spec drift guard test
         run: |
           python -m pytest tests/test_fsm_spec_matches_code.py -v --tb=short
 
-      - name: Run validation tests (syntax only)
+      - name: Syntax check validation tests
         run: |
           set -euo pipefail
           shopt -s nullglob
@@ -168,14 +193,18 @@ jobs:
           done
 
   # ============================================================
-  # Scenario smoke tests (every commit) - 1 simulated hour each
+  # Scenario smoke tests (push / PR) - 1 simulated hour each
   # ============================================================
   scenario-smoke:
     name: Scenario Smoke Tests (1h sim)
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 35
     needs: smoke-test
     if: github.event_name != 'schedule'
+
+    defaults:
+      run:
+        shell: bash -el {0}
 
     strategy:
       fail-fast: false
@@ -186,30 +215,33 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v7
 
-      - name: Set up Python
-        uses: actions/setup-python@v7
+      - name: Set up ANTARA environment
+        uses: mamba-org/setup-micromamba@v3
         with:
-          python-version: ${{ env.PYTHON_VERSION }}
-          cache: 'pip'
-
-      - name: Set up Java
-        uses: actions/setup-java@v6
-        with:
-          distribution: 'temurin'
-          java-version: ${{ env.JAVA_VERSION }}
-
-      - name: Install Python dependencies
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install orekit numpy pandas matplotlib cartopy shapely scipy skyfield pytest
+          environment-name: antara
+          create-args: >-
+            python=${{ env.PYTHON_VERSION }}
+            orekit
+            numpy
+            pandas
+            matplotlib
+            cartopy
+            shapely
+            scipy
+            skyfield
+            pytest
+            pip
+            -c conda-forge
 
       - name: Set up Orekit data
         run: |
           python - <<'PY'
           import orekit
           orekit.initVM()
+
           from orekit.pyhelpers import download_orekit_data_curdir
           download_orekit_data_curdir()
+
           print("Orekit data OK")
           PY
 
@@ -220,11 +252,13 @@ jobs:
             --duration-hours 1 \
             --step-sec 2.0 \
             --no-plots
-        timeout-minutes: 10
+        timeout-minutes: 12
 
       - name: Verify outputs
         run: |
-          test -f "results/science/${{ matrix.scenario }}_ANTARA_Science_telemetry.csv"
+          telemetry="results/science/${{ matrix.scenario }}_ANTARA_Science_telemetry.csv"
+          test -f "$telemetry"
+          ls -lh "$telemetry"
 
           python - <<'PY'
           import pandas as pd
@@ -233,6 +267,7 @@ jobs:
           path = f"results/science/{scenario}_ANTARA_Science_telemetry.csv"
 
           df = pd.read_csv(path)
+
           print(f"Rows: {len(df)}")
           print(f"Columns: {list(df.columns)}")
 
@@ -243,7 +278,7 @@ jobs:
           PY
 
   # ============================================================
-  # FSM Diagram generation (every commit)
+  # FSM Diagram generation (push / PR)
   # ============================================================
   fsm-diagram:
     name: FSM Diagram Generation
@@ -267,7 +302,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y graphviz
 
-      - name: Install Python dependencies
+      - name: Install Python Graphviz package
         run: |
           python -m pip install --upgrade pip
           python -m pip install graphviz
@@ -282,7 +317,12 @@ jobs:
           test -f docs/fsm_diagram.png
           test -f docs/fsm_diagram.svg
           test -f docs/fsm_diagram.mmd
-          ls -lh docs/fsm_diagram.png docs/fsm_diagram.svg docs/fsm_diagram.mmd
+
+          ls -lh \
+            docs/fsm_diagram.png \
+            docs/fsm_diagram.svg \
+            docs/fsm_diagram.mmd
+
           head -20 docs/fsm_diagram.mmd
 
       - name: Upload diagrams as artifacts
@@ -294,7 +334,7 @@ jobs:
           if-no-files-found: error
 
   # ============================================================
-  # Nightly full tests (scheduled) - full scenarios + MC
+  # Nightly full tests - every day at 02:00 UTC
   # ============================================================
   nightly-full:
     name: Nightly Full Tests
@@ -302,40 +342,50 @@ jobs:
     timeout-minutes: 180
     if: github.event_name == 'schedule' && github.event.schedule == '0 2 * * *'
 
+    defaults:
+      run:
+        shell: bash -el {0}
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
 
-      - name: Set up Python
-        uses: actions/setup-python@v7
+      - name: Set up ANTARA environment
+        uses: mamba-org/setup-micromamba@v3
         with:
-          python-version: ${{ env.PYTHON_VERSION }}
-          cache: 'pip'
+          environment-name: antara
+          create-args: >-
+            python=${{ env.PYTHON_VERSION }}
+            orekit
+            numpy
+            pandas
+            matplotlib
+            cartopy
+            shapely
+            scipy
+            skyfield
+            pytest
+            pip
+            -c conda-forge
 
-      - name: Set up Java
-        uses: actions/setup-java@v6
-        with:
-          distribution: 'temurin'
-          java-version: ${{ env.JAVA_VERSION }}
-
-      - name: Verify runtimes
+      - name: Verify environment
         run: |
+          which python
           python --version
-          java -version
-          echo "JAVA_HOME=$JAVA_HOME"
-
-      - name: Install Python dependencies
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install orekit numpy pandas matplotlib cartopy shapely scipy skyfield pytest
+          python - <<'PY'
+          import orekit
+          print("Orekit import OK")
+          PY
 
       - name: Set up Orekit data
         run: |
           python - <<'PY'
           import orekit
           orekit.initVM()
+
           from orekit.pyhelpers import download_orekit_data_curdir
           download_orekit_data_curdir()
+
           print("Orekit data OK")
           PY
 
@@ -354,9 +404,11 @@ jobs:
           python src/ANTARA_Science_Sim.py --scenario leop_1yr
         timeout-minutes: 60
 
-      - name: LEOP Detumble MC (full n_trials=5000)
+      - name: LEOP Detumble MC (n_trials=5000)
         run: |
-          python src/leop_detumble_mc.py --n-trials 5000 --output detumble_mc_results.pkl
+          python src/leop_detumble_mc.py \
+            --n-trials 5000 \
+            --output detumble_mc_results.pkl
         timeout-minutes: 60
 
       - name: Analyze MC results
@@ -401,7 +453,7 @@ jobs:
           if-no-files-found: warn
 
   # ============================================================
-  # Weekly validation suite (scheduled) - reference validation
+  # Weekly validation - Sundays at 03:00 UTC
   # ============================================================
   weekly-validation:
     name: Weekly Validation
@@ -409,34 +461,41 @@ jobs:
     timeout-minutes: 60
     if: github.event_name == 'schedule' && github.event.schedule == '0 3 * * 0'
 
+    defaults:
+      run:
+        shell: bash -el {0}
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
 
-      - name: Set up Python
-        uses: actions/setup-python@v7
+      - name: Set up ANTARA environment
+        uses: mamba-org/setup-micromamba@v3
         with:
-          python-version: ${{ env.PYTHON_VERSION }}
-          cache: 'pip'
-
-      - name: Set up Java
-        uses: actions/setup-java@v6
-        with:
-          distribution: 'temurin'
-          java-version: ${{ env.JAVA_VERSION }}
-
-      - name: Install Python dependencies
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install orekit numpy pandas matplotlib cartopy shapely scipy skyfield pytest
+          environment-name: antara
+          create-args: >-
+            python=${{ env.PYTHON_VERSION }}
+            orekit
+            numpy
+            pandas
+            matplotlib
+            cartopy
+            shapely
+            scipy
+            skyfield
+            pytest
+            pip
+            -c conda-forge
 
       - name: Set up Orekit data
         run: |
           python - <<'PY'
           import orekit
           orekit.initVM()
+
           from orekit.pyhelpers import download_orekit_data_curdir
           download_orekit_data_curdir()
+
           print("Orekit data OK")
           PY
 
