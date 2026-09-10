@@ -1,0 +1,73 @@
+{
+  "overall_pass": true,
+  "results": [
+    {
+      "elevation_deg": 15,
+      "friis_mbps": 1.8914865497496787,
+      "heuristic_mbps": 0.009767858147341884,
+      "configured_mbps": 0.0192,
+      "margin_db": 19.935020286935117,
+      "has_margin": true,
+      "heuristic_conservative": true
+    },
+    {
+      "elevation_deg": 20,
+      "friis_mbps": 2.693882405083071,
+      "heuristic_mbps": 0.011228637746208331,
+      "configured_mbps": 0.0192,
+      "margin_db": 21.47077405022618,
+      "has_margin": true,
+      "heuristic_conservative": true
+    },
+    {
+      "elevation_deg": 30,
+      "friis_mbps": 4.7135429652868455,
+      "heuristic_mbps": 0.01357645019878171,
+      "configured_mbps": 0.0192,
+      "margin_db": 23.900462414498524,
+      "has_margin": true,
+      "heuristic_conservative": true
+    },
+    {
+      "elevation_deg": 45,
+      "friis_mbps": 8.430439340291697,
+      "heuristic_mbps": 0.016145211172871318,
+      "configured_mbps": 0.0192,
+      "margin_db": 26.42548979146882,
+      "has_margin": true,
+      "heuristic_conservative": true
+    },
+    {
+      "elevation_deg": 60,
+      "friis_mbps": 12.13689528422606,
+      "heuristic_mbps": 0.01786761329476031,
+      "configured_mbps": 0.0192,
+      "margin_db": 28.00806376209116,
+      "has_margin": true,
+      "heuristic_conservative": true
+    },
+    {
+      "elevation_deg": 75,
+      "friis_mbps": 14.852064021978393,
+      "heuristic_mbps": 0.018870052904091234,
+      "configured_mbps": 0.0192,
+      "margin_db": 28.88485583944028,
+      "has_margin": true,
+      "heuristic_conservative": true
+    },
+    {
+      "elevation_deg": 90,
+      "friis_mbps": 15.846487476592998,
+      "heuristic_mbps": 0.0192,
+      "configured_mbps": 0.0192,
+      "margin_db": 29.16631783049711,
+      "has_margin": true,
+      "heuristic_conservative": true
+    }
+  ],
+  "monotonic": {
+    "friis": true,
+    "heuristic": true
+  },
+  "configured_rate_mbps": 0.0192
+}

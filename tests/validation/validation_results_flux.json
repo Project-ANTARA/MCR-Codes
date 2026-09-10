@@ -1,0 +1,62 @@
+{
+  "overall_pass": true,
+  "tolerance": "factor of 2",
+  "reference": "AP9/AE9 v1.5 quiet-time, L=1.5, 600km SSO",
+  "results": [
+    {
+      "channel_mev": 5.0,
+      "config_flux": 35000.0,
+      "lit_nominal": 35000.0,
+      "lit_min": 20000.0,
+      "lit_max": 70000.0,
+      "ratio": 1.0,
+      "in_range": true,
+      "within_factor2": true,
+      "passed": true
+    },
+    {
+      "channel_mev": 10.0,
+      "config_flux": 18000.0,
+      "lit_nominal": 18000.0,
+      "lit_min": 10000.0,
+      "lit_max": 35000.0,
+      "ratio": 1.0,
+      "in_range": true,
+      "within_factor2": true,
+      "passed": true
+    },
+    {
+      "channel_mev": 20.0,
+      "config_flux": 6000.0,
+      "lit_nominal": 6000.0,
+      "lit_min": 3000.0,
+      "lit_max": 12000.0,
+      "ratio": 1.0,
+      "in_range": true,
+      "within_factor2": true,
+      "passed": true
+    },
+    {
+      "channel_mev": 50.0,
+      "config_flux": 900.0,
+      "lit_nominal": 900.0,
+      "lit_min": 400.0,
+      "lit_max": 2000.0,
+      "ratio": 1.0,
+      "in_range": true,
+      "within_factor2": true,
+      "passed": true
+    },
+    {
+      "channel_mev": 100.0,
+      "config_flux": 110.0,
+      "lit_nominal": 110.0,
+      "lit_min": 50.0,
+      "lit_max": 300.0,
+      "ratio": 1.0,
+      "in_range": true,
+      "within_factor2": true,
+      "passed": true
+    }
+  ]
+}

@@ -1,0 +1,11 @@
+{
+  "cell_bol_efficiency": 0.285,
+  "packing_factor": 0.67,
+  "harness_derating": 0.88,
+  "thermal_derating": 0.88,
+  "bol_packing": 0.19095,
+  "config_value": 0.193515,
+  "error_pct": 1.3254786450662657,
+  "passed": true,
+  "note": "solar_panel_efficiency = BOL_cell * packing_factor. Harness and thermal applied in compute_solar_power()"
+}

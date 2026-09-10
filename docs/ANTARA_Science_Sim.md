@@ -3,11 +3,13 @@
 ## File Overview
 Science payload simulation for the ANTARA mission with detailed proton flux modeling. Extends the high-fidelity simulation framework with: IGRF magnetic field model (via pyIGRF), AP9/AE9 radiation belt environment (via spacepy.irbempy), multi-layer detector physics (geometric factor, energy-dependent efficiency, dead time, dark counts), event-driven histogram packetization, and SAA flux depth scaling. Includes full ADCS, EPS, FSM, telemetry, and plotting (9-panel suite + science-specific plots). Configurable via CLI arguments.
 
+**Core models** (`MissionConfig`, `ADCSModel`, `SpacecraftFSM`, `SunSubmode`, `IllegalFSMTransitionError`, `_as_flat_vector`, `BODY_AXIS_VECTORS`) are now imported from the shared **`antara_models.py`** module (Orekit-free, numpy-only). This enables lightweight Monte Carlo scripts (`leop_detumble_mc.py`, validation tests) to reuse the same models without initializing the Orekit JVM.
+
 ## Dependencies
 - **Standard Library**: `math`, `argparse`, `json`, `os`, `pickle`, `time`, `dataclasses`, `enum`, `pathlib`, `typing`, `datetime`
 - **External**: `numpy`, `pandas`, `orekit`, `shapely`
 - **Optional External** (guarded with try/except): `matplotlib`, `cartopy`, `pyIGRF` (`ppigrf`), `spacepy.irbempy`
-- **Internal**: `paths` (`init_orekit_data`, `results_path`, `figures_path`)
+- **Internal**: `paths` (`init_orekit_data`, `results_path`, `figures_path`), `antara_models` (`MissionConfig`, `ADCSModel`, `SpacecraftFSM`, `SunSubmode`, `IllegalFSMTransitionError`, `_as_flat_vector`, `BODY_AXIS_VECTORS`)
 - **Orekit/Java Modules**: Extensive (propagation, forces, frames, orbits, time, bodies, atmosphere, events)
 
 ## Exports / Public API
@@ -15,7 +17,7 @@ Science payload simulation for the ANTARA mission with detailed proton flux mode
 ### Module Constants
 | Constant | Type | Description |
 |----------|------|-------------|
-| `BODY_AXIS_VECTORS` | `Dict[str, np.ndarray]` | Canonical body axes |
+| `BODY_AXIS_VECTORS` | `Dict[str, np.ndarray]` | Canonical body axes (re-exported from `antara_models`) |
 | `_MATPLOTLIB_AVAILABLE` | `bool` | Matplotlib import status |
 | `_CARTOPY_AVAILABLE` | `bool` | Cartopy import status |
 | `_PYIGRF_AVAILABLE` | `bool` | pyIGRF import status |
@@ -24,7 +26,7 @@ Science payload simulation for the ANTARA mission with detailed proton flux mode
 ### Helper Functions
 
 #### `_as_flat_vector(vector) -> np.ndarray`
-Normalizes any vector-like input to flat float array (3,). Same as in Master.
+Normalizes any vector-like input to flat float array (3,). **Re-exported from `antara_models`** — this version additionally handles Orekit `Vector3D` objects.
 
 #### `compute_detector_geometric_factor_cm2sr(theta_max_deg: float) -> float`
 Computes geometric factor G = 2π(1 - cos(θ_max)) for a conical FOV.
@@ -32,35 +34,16 @@ Computes geometric factor G = 2π(1 - cos(θ_max)) for a conical FOV.
 ### Classes
 
 #### `SunSubmode(str, Enum)`
-Power submodes within SUN_POINTING: CHARGING, PASSIVE, ECLIPSE, NONE.
+Power submodes within SUN_POINTING: CHARGING, PASSIVE, ECLIPSE, NONE. **Re-exported from `antara_models`**.
 
 #### `MissionConfig` (dataclass)
-**Extends Master's config with science-specific parameters:**
-- **Orbit/SC/ADCS/EPS**: Similar to Master but with different defaults (e.g., `raan_deg=15.0`, `wheel_rate_damp_gain=0.2`, `detumble_stable_rate_deg_sec=0.1`, `downlink_rate_mbps=0.0192`)
-- **Second GS**: `gs2_enabled=False`, Svalbard (78°N, 15°E, 5° mask)
-- **Science/Payload**:
-  - `energy_channels_mev`: (5, 10, 20, 50, 100) MeV
-  - `ap9_baseline_flux`: AP9 quiet-time differential flux per channel (particles/cm²/s/sr/MeV)
-  - `detector_efficiency`: Per-channel efficiency (0.92, 0.90, 0.87, 0.80, 0.68)
-  - `detector_dead_time_sec`: 1 µs
-  - `detector_dark_count_rate_hz`: 0.5 cps/channel
-  - `saa_depth_flux_min/max`: 0.5–2.0 flux scaling by distance to SAA polygon center
-  - `ew_asymmetry_amplitude`: 0.15
-  - `storm_time_flux_multiplier`: 1.5
-  - `igrf_epoch_year`: 2000.25
-  - `science_histogram_downlink_interval_sec`: 60s (safety-net flush)
-  - `science_packet_bytes_per_bin`: 4 bytes
-  - `science_packet_header_bytes`: 16 bytes
-  - `enable_periphery_bin_merge`: True
-  - `detector_coincidence_window_ns`: 20 ns
-  - `detector_dead_time_ns`: 250 ns
-- **Validation**: `__post_init__` checks orbit params, EPS threshold ordering, tip-off rates, channel array lengths
+**All mission parameters** — **re-exported from `antara_models`** with identical definition. Validation in `__post_init__` catches config errors early.
 
 #### `OrbitState` / `AttitudeCommand` (dataclasses)
-Same structure as Master.
+Same structure as Master. Uses Orekit `AbsoluteDate` and `Vector3D`.
 
 #### `ADCSModel`
-Nearly identical to Master's ADCSModel with bug fixes noted in comments:
+Attitude determination & control with quaternion dynamics, B-dot, wheel damping, saturation. **Re-exported from `antara_models`** with bug fixes:
 - Bug 11 fix: explicit re-normalization after quaternion integration step
 - Bug fix in `wheel_damp_control`: per-axis inertia-scaled damping (k_damp = 0.4/dt)
 - `_enforce_quaternion_continuity` tracks corrections by call site
@@ -69,7 +52,7 @@ Nearly identical to Master's ADCSModel with bug fixes noted in comments:
 Similar to Master with `payload_coin_logic_power_w` added to loads.
 
 #### `SAAModel`
-Same as Master (Shapely polygon, entry/exit detection, data accumulation).
+Shapely polygon, entry/exit detection, data accumulation.
 
 #### `GroundStationModel`
 Supports two ground stations (GS_INDIA + optional GS2_SVALBARD).
@@ -101,19 +84,16 @@ Detector layer specification: `name`, `thickness_um`, `material`, `threshold_mev
 Extended with dual-GS support and event-driven histogram downlink.
 
 #### `IllegalFSMTransitionError(RuntimeError)`
-Custom exception for FSM transition violations.
+Custom exception for FSM transition violations. **Re-exported from `antara_models`**.
 
 #### `SpacecraftFSM`
-Similar to Master but with:
-- Additional `SAFE` exit condition: `battery_wh >= safe_exit_battery_fraction × capacity`
-- `fault_debounce_samples` / `recovery_debounce_samples` for hysteresis
-- `target_mode` tracking for slew coordination
+7-state finite state machine with debounced fault logic. **Re-exported from `antara_models`** with additional `SAFE` exit condition: `battery_wh >= safe_exit_battery_fraction × capacity`, `fault_debounce_samples` / `recovery_debounce_samples` for hysteresis, `target_mode` tracking for slew coordination.
 
 #### `TelemetryLogger`
 Extended telemetry columns including science-specific fields (flux, counts, livetime, packet info, IGRF B-field).
 
 #### `ANTARAScienceSimulator`
-Top-level runner extending Master's `ANTARASimulator` with science-specific logic.
+Top-level runner with science-specific logic.
 **Key Additional Methods**:
 - `_init_igrf()` — Initialize IGRF model
 - `_init_proton_environment()` — Initialize proton model

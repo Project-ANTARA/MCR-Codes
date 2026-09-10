@@ -1,0 +1,346 @@
+name: ANTARA CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+
+# Only run one workflow at a time for the same ref
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHON_VERSION: '3.11'
+  JAVA_VERSION: '11'
+
+jobs:
+  # ============================================================
+  # Smoke tests (every commit) - fast syntax/import checks
+  # ============================================================
+  smoke-test:
+    name: Smoke Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: ${{ env.JAVA_VERSION }}
+          cache: maven
+
+      - name: Install Python dependencies
+        run: |
+          pip install --upgrade pip
+          pip install orekit numpy pandas matplotlib cartopy shapely pytest
+
+      - name: Verify Orekit data (download if missing)
+        run: |
+          python -c "
+          import orekit
+          orekit.initVM()
+          from orekit.pyhelpers import download_orekit_data_curdir
+          download_orekit_data_curdir()
+          print('Orekit data OK')
+          "
+
+      - name: Syntax check all src/*.py
+        run: |
+          for f in src/*.py; do
+            python -m py_compile "$f" && echo "OK: $f"
+          done
+
+      - name: Import test (fast)
+        run: |
+          python -c "
+          import orekit
+          orekit.initVM()
+          from ANTARA_Science_Sim import MissionConfig, ANTARAScienceSimulator
+          print('ANTARA_Science_Sim imports OK')
+          from ANTARA_Master import MissionConfig, ANTARASimulator
+          print('ANTARA_Master imports OK')
+          from leop_detumble_mc import run_single_trial, run_monte_carlo
+          print('leop_detumble_mc imports OK')
+          from compare_scenarios import load_scenario_data
+          print('compare_scenarios imports OK')
+          from scenarios import build_scenario
+          print('scenarios imports OK')
+          "
+
+  # ============================================================
+  # Unit tests (every commit) - core module tests
+  # ============================================================
+  unit-tests:
+    name: Unit Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs: smoke-test
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: ${{ env.JAVA_VERSION }}
+          cache: maven
+
+      - name: Install Python dependencies
+        run: |
+          pip install --upgrade pip
+          pip install orekit numpy pandas matplotlib cartopy shapely pytest
+
+      - name: Run FSM spec drift guard test
+        run: |
+          python -m pytest tests/test_fsm_spec_matches_code.py -v
+
+      - name: Run validation tests (syntax only)
+        run: |
+          for f in tests/validation/test_*.py; do
+            python -m py_compile "$f" && echo "OK: $f"
+          done
+
+  # ============================================================
+  # Scenario smoke tests (every commit) - 1 simulated hour each
+  # ============================================================
+  scenario-smoke:
+    name: Scenario Smoke Tests (1h sim)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: smoke-test
+    strategy:
+      matrix:
+        scenario: [leop_24h, no_leop_24h]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: ${{ env.JAVA_VERSION }}
+          cache: maven
+
+      - name: Install Python dependencies
+        run: |
+          pip install --upgrade pip
+          pip install orekit numpy pandas matplotlib cartopy shapely
+
+      - name: Run scenario ${{ matrix.scenario }} (1 hour)
+        run: |
+          python src/ANTARA_Science_Sim.py --scenario ${{ matrix.scenario }} --duration-hours 1 --step-sec 2.0 --no-plots
+        timeout-minutes: 10
+
+      - name: Verify outputs
+        run: |
+          ls -la results/science/${{ matrix.scenario }}_ANTARA_Science_telemetry.csv
+          python -c "
+          import pandas as pd
+          df = pd.read_csv('results/science/${{ matrix.scenario }}_ANTARA_Science_telemetry.csv')
+          print(f'Rows: {len(df)}')
+          print(f'Modes: {df[\"mode\"].unique()}')
+          assert len(df) > 0, 'No telemetry data'
+          "
+
+  # ============================================================
+  # FSM Diagram generation (every commit)
+  # ============================================================
+  fsm-diagram:
+    name: FSM Diagram Generation
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: smoke-test
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+
+      - name: Install graphviz
+        run: sudo apt-get update && sudo apt-get install -y graphviz
+
+      - name: Install Python dependencies
+        run: |
+          pip install --upgrade pip
+          pip install graphviz
+
+      - name: Generate FSM diagrams
+        run: |
+          mkdir -p docs
+          python src/plot_fsm_diagram.py --output-dir docs --format both
+
+      - name: Verify outputs
+        run: |
+          ls -la docs/fsm_diagram.png docs/fsm_diagram.svg docs/fsm_diagram.mmd
+          head -20 docs/fsm_diagram.mmd
+
+      - name: Upload diagrams as artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: fsm-diagrams
+          path: docs/fsm_diagram.*
+          retention-days: 30
+
+  # ============================================================
+  # Nightly full tests (scheduled) - full scenarios + MC
+  # ============================================================
+  nightly-full:
+    name: Nightly Full Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    if: github.event_name == 'schedule'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: ${{ env.JAVA_VERSION }}
+          cache: maven
+
+      - name: Install Python dependencies
+        run: |
+          pip install --upgrade pip
+          pip install orekit numpy pandas matplotlib cartopy shapely scipy skyfield pytest
+
+      - name: Full leop_24h scenario
+        run: |
+          python src/ANTARA_Science_Sim.py --scenario leop_24h
+        timeout-minutes: 30
+
+      - name: Full no_leop_24h scenario
+        run: |
+          python src/ANTARA_Science_Sim.py --scenario no_leop_24h
+        timeout-minutes: 30
+
+      - name: Full leop_1yr scenario (with multi-rate)
+        run: |
+          python src/ANTARA_Science_Sim.py --scenario leop_1yr
+        timeout-minutes: 60
+
+      - name: LEOP Detumble MC (full n_trials=5000)
+        run: |
+          python src/leop_detumble_mc.py --n-trials 5000 --output detumble_mc_results.pkl
+        timeout-minutes: 60
+
+      - name: Analyze MC results
+        run: |
+          python src/analyze_detumble_mc.py detumble_mc_results.pkl --output-dir detumble_analysis
+
+      - name: Run validation suite
+        run: |
+          python scripts/generate_validation_report.py
+        timeout-minutes: 30
+
+      - name: Scenario comparison
+        run: |
+          python src/compare_scenarios.py --results-dir results/science --output-dir figures/science
+
+      - name: Upload results
+        uses: actions/upload-artifact@v4
+        with:
+          name: nightly-results
+          path: |
+            results/
+            figures/
+            detumble_analysis/
+            validation_results_*.json
+            VALIDATION_REPORT.md
+          retention-days: 90
+
+      - name: Upload FSM diagrams
+        uses: actions/upload-artifact@v4
+        with:
+          name: nightly-fsm-diagrams
+          path: docs/fsm_diagram.*
+          retention-days: 90
+
+  # ============================================================
+  # Weekly validation suite (scheduled) - reference validation
+  # ============================================================
+  weekly-validation:
+    name: Weekly Validation
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    if: github.event_name == 'schedule'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: ${{ env.JAVA_VERSION }}
+          cache: maven
+
+      - name: Install Python dependencies
+        run: |
+          pip install --upgrade pip
+          pip install orekit numpy pandas matplotlib cartopy shapely scipy skyfield pytest
+
+      - name: Run all validation tests
+        run: |
+          python scripts/generate_validation_report.py
+        timeout-minutes: 45
+
+      - name: Upload validation report
+        uses: actions/upload-artifact@v4
+        with:
+          name: validation-report
+          path: VALIDATION_REPORT.md
+          retention-days: 90
+
+      - name: Upload validation JSON
+        uses: actions/upload-artifact@v4
+        with:
+          name: validation-data
+          path: tests/validation/validation_results_*.json
+          retention-days: 90
+
+# ============================================================
+# Scheduled runs
+# ============================================================
+on:
+  schedule:
+    # Nightly at 2 AM UTC
+    - cron: '0 2 * * *'
+    # Weekly on Sundays at 3 AM UTC
+    - cron: '0 3 * * 0'

@@ -1,0 +1,10 @@
+{
+  "tau_bdot_sec": 762.2394025687867,
+  "t_analytical_sec": 1171.5048139229912,
+  "mc_handover_sec": 995.0,
+  "mc_time_to_complete_sec": 1009.0,
+  "mc_success": true,
+  "ratio": 0.8493349648885065,
+  "order_of_magnitude_pass": 1,
+  "overall_pass": 1
+}

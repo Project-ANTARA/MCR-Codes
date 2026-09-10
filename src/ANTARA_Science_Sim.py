@@ -17,6 +17,18 @@ import pandas as pd
 from datetime import datetime
 from paths import figures_path, init_orekit_data, results_path
 
+# Import core models from shared module (no Orekit dependencies)
+from antara_models import (
+    MissionConfig,
+    ADCSModel,
+    SpacecraftFSM,
+    SunSubmode,
+    IllegalFSMTransitionError,
+    EPSModel,
+    _as_flat_vector as _antara_as_flat_vector,
+    BODY_AXIS_VECTORS,
+)
+
 try:
     from orekit import JArray_double
 except ImportError:
@@ -78,15 +90,6 @@ from org.orekit.propagation.numerical import NumericalPropagator
 from org.orekit.time import AbsoluteDate, TimeScalesFactory
 from org.orekit.utils import Constants, IERSConventions
 
-BODY_AXIS_VECTORS = {
-    "+X": np.array([1.0, 0.0, 0.0], dtype=float),
-    "-X": np.array([-1.0, 0.0, 0.0], dtype=float),
-    "+Y": np.array([0.0, 1.0, 0.0], dtype=float),
-    "-Y": np.array([0.0, -1.0, 0.0], dtype=float),
-    "+Z": np.array([0.0, 0.0, 1.0], dtype=float),
-    "-Z": np.array([0.0, 0.0, -1.0], dtype=float),
-}
-
 
 def _as_flat_vector(vector) -> np.ndarray:
     """Return a canonical flat 3-vector for diagnostics, geometry, and telemetry.
@@ -109,359 +112,6 @@ def _as_flat_vector(vector) -> np.ndarray:
     if vector.shape != (3,):
         raise ValueError(f"Expected 3-vector, got shape {vector.shape}")
     return vector
-
-
-class SunSubmode(str, Enum):
-    """Power-state submodes of the SUN_POINTING FSM mode.
-
-    The spacecraft holds the same orbit-normal inertial attitude in all three
-    submodes. Submodes describe the POWER condition, not the attitude target.
-
-    CHARGING - Sunlit and battery actively gaining charge.
-    PASSIVE  - Sunlit and battery full. Coasting state.
-    ECLIPSE  - Spacecraft in umbra. Solar generation = 0.
-    NONE     - Current FSM mode is not SUN_POINTING.
-    """
-
-    CHARGING = "CHARGING"
-    PASSIVE = "PASSIVE"
-    ECLIPSE = "ECLIPSE"
-    NONE = "NONE"
-
-    def __str__(self) -> str:
-        return self.value
-
-
-@dataclass
-class MissionConfig:
-    """Top-level dataclass holding all mission parameters.
-    All numeric constants must live here. No magic numbers in logic."""
-
-    """Authoritative spacecraft body frame convention (ICD Rev B):
-    +X = RAM face / payload boresight  → aligned to velocity vector (LVLH)
-    +Y = directional relay antenna face → aligned to nadir (LVLH)
-    +Z = fixed solar panel              → aligned to orbit normal, sun-facing side (LVLH)
-    -Y = deployable panel packed face
-    -Z = omni antenna face
-    -X = PPOD deployment face
-
-    Attitude philosophy (LVLH-fixed):
-    The spacecraft holds a continuous LVLH body frame in ALL operational modes
-    (SUN_POINTING, DETECTION, RELAY).  No mode actively tracks the Sun, a ground
-    station, or a science target.  The LVLH frame is re-solved every timestep so
-    +X stays RAM, +Y stays nadir, and +Z stays on the sun-side orbit normal
-    throughout the orbit.  Slews between modes are near-zero angle because all
-    modes share the same target frame.
-    During COLD_AND_DARK and DETUMBLE the target attitude is solved once and
-    then frozen (inertial hold) for the duration of the phase so that the
-    detumble controller has a stable, unchanging reference to settle against.
-    Startup is handled separately through a detumble phase that settles the
-    bus onto the nominal default orientation before mission operations begin."""
-
-    sim_duration_hours: float = 24.0
-    step_sec: float = 2.0
-    progress_report_interval_sec: float = 180.0
-    start_year: int = 2000
-    start_month: int = 3
-    start_day: int = 1
-
-    # Orbit definition
-    altitude_m: float = 600_000.0
-    inclination_deg: float = 97.6
-    eccentricity: float = 0.001
-    raan_deg: float = 15.0
-    arg_perigee_deg: float = 0.0
-    true_anomaly_deg: float = 0.0
-
-    # Spacecraft physical properties
-    mass_kg: float = 3.0           # 3U CubeSat typical wet mass
-    drag_coeff: float = 2.2
-    cross_section_m2: float = 0.01  # 3U face: 10cm × 10cm = 0.01 m²
-    srp_coeff: float = 1.8
-
-    # ADCS performance and actuator limits
-    # Based on Tensor Tech Datasheet v1.2.3b and ICD v1.3.1b
-    max_slew_rate_deg_sec: float = 5.0
-    # Datasheet specifies acceleration torque up to 1 mNm
-    wheel_max_torque_nm: float = 0.001
-    # Conservative derived angular acceleration estimate
-    # (not explicitly specified in datasheet)
-    max_slew_accel_deg_sec2: float = 1.0
-    # Datasheet angular momentum storage
-    wheel_max_momentum_nms: float = 0.01317
-    # Use control accuracy rather than unrealistic fine pointing
-    pointing_accuracy_deg: float = 0.4
-    # More realistic settling time for agile CubeSat CMG system
-    settling_time_sec: float = 8.0
-    # Datasheet power modes
-    adcs_idle_power_w: float = 0.8
-    adcs_slew_power_w: float = 4.5
-
-    # EPS and solar-array properties
-    battery_capacity_wh: float = 25.0   
-    initial_battery_wh: float = 18.0    
-    solar_panel_efficiency: float = 0.193515  # BOL cell efficiency × packing factor × harness derating
-                                            # 28.5% triple-junction × 0.67 packing = ~0.193515
-    solar_panel_area_m2: float = 0.085     # 3U: 1 body-mounted + 2 deployable panels, total active area
-    solar_constant_w_m2: float = 1361.0   
-    eps_charge_efficiency: float = 0.88    # MPPT + regulator losses
-    solar_temp_derating: float = 0.88      # temperature derating at operating temp (~60°C BOL)
-
-    # EPS charge-state thresholds
-    low_power_enter_wh: float = 10.0   
-    low_power_exit_wh: float = 17.50
-    critical_power_wh: float = 7.50     
-    saa_detection_min_power_wh: float = 10.0
-    min_relaybattery_capacity_wh: float = 10.0
-    safe_exit_battery_fraction: float = 0.75
-
-    # Electrical loads
-    obc_power_w: float = 0.8                
-    eps_power_w: float = 1.2                
-    payload_power_w: float = 10.0            
-    payload_coin_logic_power_w: float = 2.0
-    radio_tx_power_w: float = 12.0
-
-    # Storage and data system
-    onboard_storage_mb: float = 32_000.0
-    initial_storage_mb: float = 10.0
-    storage_high_watermark_mb: float = 24_000.0
-
-    # Communications geometry and link rate.
-    # Payload_1.docx confirms 9.6 kbps is the baseline link budget and is
-    # already >30x oversized for the science histogram stream alone (a
-    # 272-byte packet at ~7s event-driven cadence needs ~311 bps). 19.2 kbps
-    # is used here instead: the next standard baud-rate step on the same
-    # class of UHF/VHF transceiver hardware (no different radio, just a
-    # faster setting), sized to comfortably carry science + housekeeping/
-    # ADCS/EPS telemetry + command ACKs sharing the same link, not because
-    # the science payload itself demands more bandwidth.
-    downlink_rate_mbps: float = 0.0192
-    gs_elevation_mask_deg: float = 15.0
-    gs_lat_deg: float = 15.0
-    gs_lon_deg: float = 74.0
-    gs_alt_m: float = 70.0
-
-    # Second ground station: Svalbard (78°N, 15°E) — polar station for high-latitude passes
-    # FIX (Bug 6): adds a polar/high-latitude station to triple contact opportunities.
-    gs2_enabled: bool = False
-    gs2_lat_deg: float = 78.0
-    gs2_lon_deg: float = 15.0
-    gs2_alt_m: float = 50.0
-    gs2_elevation_mask_deg: float = 5.0   # polar stations typically use lower masks
-
-    # Payload data generation
-    # Science payload rate in megabits per second. Converted to MB per step as
-    # rate_mbit_per_sec * dt_sec / 8.0.
-    science_data_rate_mbps: float = 0.01152
-
-    # Mode timing, geometric validity, and guidance hysteresis
-    startup_cold_sec: float = 120.0
-    initial_body_rate_deg_sec_x: float = 6.0
-    initial_body_rate_deg_sec_y: float = -5.5
-    initial_body_rate_deg_sec_z: float = 4.5
-    initial_body_accel_deg_sec2_x: float = 0.12
-    initial_body_accel_deg_sec2_y: float = -0.015
-    initial_body_accel_deg_sec2_z: float = 0.08
-    detumble_target_attitude_label: str = "DEFAULT_ORIENTATION_HOLD"
-    inertia_tensor_kgm2: Tuple[float, float, float] = (0.016, 0.016, 0.004)
-    bdot_gain: float = 3.0e4
-    bdot_handover_rate_deg_sec: float = 2.0
-    wheel_rate_damp_gain: float = 0.2
-    detumble_stable_rate_deg_sec: float = 0.1
-    # Supported values: "dipole" or "igrf". Dipole remains the default DITL model.
-    earth_b_field_model: str = "dipole"
-    large_slew_threshold_deg: float = 60.0
-    critical_recovery_target_wh: float = 6.5
-    attitude_command_deadband_deg: float = 1.5  
-    safe_hold_deadband_deg: float = 7.5
-    ram_track_deadband_deg: float = 5.0
-    relay_track_deadband_deg: float = 3.0
-    payload_pointing_valid_deg: float = 10.0
-    relay_pointing_valid_deg: float = 5.0
-    directional_antenna_half_beamwidth_deg: float = 40.0
-    detection_pointing_hard_limit_deg: float = 2.0
-    relay_pointing_hard_limit_deg: float = 5.0
-    sun_pointing_hard_limit_deg: float = 5.0
-    charging_complete_threshold_wh: float = 22.5
-    minimum_detection_duration_sec: float = 120.0
-    minimum_relay_duration_sec: float = 120.0
-    max_saturation_hold_sec: float = 300.0
-    minimum_settled_time_before_payload_sec: float = 15.0
-    minimum_settled_time_before_tx_sec: float = 10.0
-    fault_debounce_samples: int = 3
-    recovery_debounce_samples: int = 3
-    mode_transition_grace_steps: int = 5
-    penumbra_transition_sec: float = 30.0
-    slew_transition_rate_deg_sec: float = 2.0
-    slew_transition_penalty_sec: float = 60.0
-    slew_power_penalty_w: float = 5.0
-    max_solar_power_w: float = 22.0
-    eclipse_heater_power_w: float = 0.8
-    battery_taper_soc_start: float = 0.90
-    battery_taper_min_fraction: float = 0.20
-    wheel_momentum_recovery_fraction: float = 0.80
-    magnetorquer_dipole_Am2: float = 0.2          # peak dipole per axis (A·m²), realistic 3U
-    earth_B_field_T: float = 30.0e-6              # representative SSO B-field at 600 km (T)
-    sun_pointing_tracking_noise_deg: float = 2.5  # 1-sigma Gaussian noise on sun incidence angle (deg)
-                                                   # accounts for jitter, finite BW, settling error
-    wheel_inertia_kgm2: float = 1.5e-5
-    rng_seed: int = 42
-    # Numerical propagator configuration
-    min_integrator_step_sec: float = 0.1
-    max_integrator_step_sec: float = 120.0
-    integrator_position_tolerance_m: float = 10.0
-    integrator_velocity_tolerance_mps: float = 0.01
-
-    # Plotting and telemetry colors
-    mode_colors: Dict[str, str] = field(
-        default_factory=lambda: {
-            "COLD_AND_DARK": "#111111",
-            "DETUMBLE": "#8c564b",
-            "SAFE": "#7f7f7f",
-            "SLEWING": "#9467bd",
-            "SUN_POINTING": "#f1c40f",
-            "DETECTION": "#d62728",
-            "RELAY": "#1f77b4",
-        }
-    )
-    sun_submode_colors: Dict[str, str] = field(
-        default_factory=lambda: {
-            SunSubmode.CHARGING: "#f1c40f",
-            SunSubmode.PASSIVE: "#ffe680",
-            SunSubmode.ECLIPSE: "#4a4a4a",
-            SunSubmode.NONE: "#ffffff",
-        }
-    )
-
-    # ── Science / Payload ─────────────────────────────────────────────────────────
-    # Proton energy channel centres (MeV) — 5 logarithmically-spaced bins 5–100 MeV
-    energy_channels_mev: Tuple[float, ...] = (5.0, 10.0, 20.0, 50.0, 100.0)
-
-    # AP9-derived mean quiet-time differential flux at 600 km SSO sub-SAA peak
-    # Units: particles / cm² / s / sr / MeV  (scalar per channel, representative)
-    # Source: AP9/AE9 v1.5 tabulated values for L~1.5, 600 km, quiet time
-    ap9_baseline_flux: Tuple[float, ...] = (3.5e4, 1.8e4, 6.0e3, 9.0e2, 1.1e2)
-
-    # Detector geometric factor (cm² sr) — represents scintillator + PIN diode stack
-
-    # Detector energy-dependent efficiency (fraction, per channel)
-    # Order matches energy_channels_mev
-    detector_efficiency: Tuple[float, ...] = (0.92, 0.90, 0.87, 0.80, 0.68)
-
-    # Dead-time per detected event (seconds) — limits max count rate
-    detector_dead_time_sec: float = 1.0e-6
-
-    # Electronic noise dark-count rate (counts / s / channel)
-    detector_dark_count_rate_hz: float = 0.5
-
-    # SAA depth factor range [min, max] applied to baseline flux by Shapely distance
-    saa_depth_flux_min: float = 0.5
-    saa_depth_flux_max: float = 2.0
-
-    # East-West asymmetry amplitude (fraction)
-    ew_asymmetry_amplitude: float = 0.15
-
-    # Storm-time multiplier applied to flux when space-weather flag is True
-    storm_time_flux_multiplier: float = 1.5
-
-    # IGRF epoch year (float) for pyIGRF call
-    igrf_epoch_year: float = 2000.25   # matches sim start_date 2000-03-01
-
-    # Event-driven histogram snapshot model.
-    # A snapshot packet is flushed on a physical EVENT (the spacecraft
-    # crosses into a new spatial cell, or an SAA pass closes) rather than a
-    # fixed wall-clock timer. This ties readout cadence to the mission's own
-    # finest spatial tier (EMSC cell dwell ~7 s), giving near-EMSC-resolution
-    # ground reconstruction from timestamp/position correlation, instead of
-    # an arbitrary clock tick. science_histogram_downlink_interval_sec is
-    # kept only as a safety-net cap: if the spacecraft lingers in one cell
-    # longer than this, force a flush anyway so pending data can't buffer
-    # forever (matches the doc's illustrative baseline cadence).
-    science_histogram_downlink_interval_sec: float = 60.0
-    # Per Payload_1.docx: "A single histogram: 64 bins x 4 bytes per count =
-    # 256 bytes." Hardware histogram readout is a fixed-width dump of every
-    # bin counter -- there is no onboard sparse/adaptive compression -- so
-    # packet size is bins x bytes_per_bin, not variable with signal content.
-    science_packet_bytes_per_bin: float = 4.0
-    # Fixed per-packet overhead: timestamp, spacecraft position, livetime
-    # fraction, temperature/housekeeping metadata (doc: "you can afford...
-    # housekeeping, temperature, livetime metadata with enormous margin").
-    science_packet_header_bytes: float = 16.0
-    enable_periphery_bin_merge: bool = True
-    detector_coincidence_window_ns: float = 20.0
-    detector_dead_time_ns: float = 250.0
-
-    def __post_init__(self) -> None:
-        """Fail fast on physically or logically inconsistent configurations.
-
-        This matters most for unattended batch/Monte-Carlo campaigns: a bad
-        sampled config should be rejected in milliseconds at construction,
-        not discovered after burning hours of compute mid-run.
-        """
-
-        errors: List[str] = []
-
-        if not (0.0 <= self.eccentricity < 1.0):
-            errors.append(f"eccentricity={self.eccentricity} must be in [0, 1)")
-        if not (0.0 <= self.raan_deg < 360.0):
-            errors.append(f"raan_deg={self.raan_deg} must be in [0, 360)")
-        if not (0.0 <= self.inclination_deg <= 180.0):
-            errors.append(f"inclination_deg={self.inclination_deg} must be in [0, 180]")
-        if self.altitude_m <= 0.0:
-            errors.append(f"altitude_m={self.altitude_m} must be positive")
-        if self.mass_kg <= 0.0:
-            errors.append(f"mass_kg={self.mass_kg} must be positive")
-        if self.step_sec <= 0.0:
-            errors.append(f"step_sec={self.step_sec} must be positive")
-        if self.sim_duration_hours <= 0.0:
-            errors.append(f"sim_duration_hours={self.sim_duration_hours} must be positive")
-
-        # EPS hysteresis ordering: this chain must be strictly increasing or
-        # the low-power/critical-power/charging state machine can oscillate
-        # or deadlock.
-        eps_chain = [
-            ("critical_power_wh", self.critical_power_wh),
-            ("low_power_enter_wh", self.low_power_enter_wh),
-            ("low_power_exit_wh", self.low_power_exit_wh),
-            ("charging_complete_threshold_wh", self.charging_complete_threshold_wh),
-            ("battery_capacity_wh", self.battery_capacity_wh),
-        ]
-        for (name_a, val_a), (name_b, val_b) in zip(eps_chain, eps_chain[1:]):
-            if not (val_a < val_b):
-                errors.append(
-                    f"EPS threshold ordering violated: {name_a}={val_a} must be < {name_b}={val_b}"
-                )
-        if not (0.0 <= self.initial_battery_wh <= self.battery_capacity_wh):
-            errors.append(
-                f"initial_battery_wh={self.initial_battery_wh} must be within "
-                f"[0, battery_capacity_wh={self.battery_capacity_wh}]"
-            )
-
-        # Tip-off (deployment) rates/accelerations: sanity bound so a Monte
-        # Carlo sampler with a mis-specified distribution is caught here
-        # rather than producing a physically absurd detumble case.
-        max_reasonable_tipoff_rate_deg_sec = 50.0
-        for axis, rate in (
-            ("x", self.initial_body_rate_deg_sec_x),
-            ("y", self.initial_body_rate_deg_sec_y),
-            ("z", self.initial_body_rate_deg_sec_z),
-        ):
-            if abs(rate) > max_reasonable_tipoff_rate_deg_sec:
-                errors.append(
-                    f"initial_body_rate_deg_sec_{axis}={rate} exceeds sanity bound "
-                    f"of +/-{max_reasonable_tipoff_rate_deg_sec} deg/s"
-                )
-
-        if len(self.energy_channels_mev) != len(self.ap9_baseline_flux):
-            errors.append("energy_channels_mev and ap9_baseline_flux length mismatch")
-        if len(self.energy_channels_mev) != len(self.detector_efficiency):
-            errors.append("energy_channels_mev and detector_efficiency length mismatch")
-
-        if errors:
-            raise ValueError(
-                "Invalid MissionConfig — " + "; ".join(errors)
-            )
 
 
 @dataclass
@@ -495,670 +145,6 @@ class AttitudeCommand:
     sun_visible: bool = True
 
 
-class ADCSModel:
-    """
-    Manages attitude state and slew dynamics.
-
-    Attributes:
-      - current_quaternion (from Orekit attitude)
-      - wheel_momentum_Nms (3-axis float[3])
-      - is_slewing (bool)
-      - slew_angle_deg (float)
-      - slew_time_remaining_sec (float)
-      - settling (bool)
-
-    Methods:
-      - compute_slew(prev_attitude, new_attitude) -> (angle_deg, time_sec)
-      - update_wheel_momentum(torque_vec, dt)
-      - check_saturation() -> bool
-      - get_pointing_error_deg() -> float
-
-    Quaternion convention:
-      - scalar-first [w, x, y, z]
-      - maps body-frame vectors into inertial coordinates
-      - DCM columns are the inertial representations of +X_body, +Y_body, +Z_body
-
-    Model trapezoidal slew profile: ramp-up, coast, ramp-down.
-    Track per-axis (roll, pitch, yaw) from ZYX Euler decomposition.
-    Wheel momentum accumulates every timestep; saturation triggers
-    a flag (no FDIR needed — just set is_saturated and log it).
-    """
-
-    def __init__(self, config: MissionConfig) -> None:
-        """Initialise ADCS state containers, quaternion state, and running counters."""
-
-        self.config = config
-        self.current_quaternion = np.array([1.0, 0.0, 0.0, 0.0], dtype=float)
-        self.target_quaternion = np.array([1.0, 0.0, 0.0, 0.0], dtype=float)
-        self.current_quaternion_tuple: Tuple[float, float, float, float] = (1.0, 0.0, 0.0, 0.0)
-        self.wheel_momentum_nms = np.zeros(3, dtype=float)
-        self.initial_body_rate_deg_sec = np.array(
-            [
-                config.initial_body_rate_deg_sec_x,
-                config.initial_body_rate_deg_sec_y,
-                config.initial_body_rate_deg_sec_z,
-            ],
-            dtype=float,
-        )
-        self.initial_body_accel_deg_sec2 = np.array(
-            [
-                config.initial_body_accel_deg_sec2_x,
-                config.initial_body_accel_deg_sec2_y,
-                config.initial_body_accel_deg_sec2_z,
-            ],
-            dtype=float,
-        )
-        self.body_rate_deg_sec = self.initial_body_rate_deg_sec.copy()
-        self.body_accel_deg_sec2 = self.initial_body_accel_deg_sec2.copy()
-        self.inertia_tensor_kgm2 = np.array(config.inertia_tensor_kgm2, dtype=float)
-        self.is_slewing = False
-        self.slew_angle_deg = 0.0
-        self.slew_time_remaining_sec = 0.0
-        self.settling = False
-        self.settling_time_remaining_sec = 0.0
-        self.is_saturated = False
-        self.saturation_recovery_active = False
-        self.saturation_hold_active = False
-        self.saturation_start_time_sec: Optional[float] = None
-        self.time_sec = 0.0
-        self.saturation_event_count = 0
-        self.total_slew_time_sec = 0.0
-        self.quaternion_continuity_corrections = 0
-        self.quaternion_continuity_corrections_by_site: Dict[str, int] = {
-            "integration": 0,
-            "delta_quaternion": 0,
-            "command_attitude": 0,
-            "advance": 0,
-            "build_frame": 0,
-            "unspecified": 0,
-        }
-        self.rejected_micro_slew_commands = 0
-        self.last_euler_delta_deg = np.zeros(3, dtype=float)
-        self.current_slew_rate_deg_sec = 0.0
-        self.previous_slew_rate_deg_sec = 0.0
-        self.current_angular_accel_deg_sec2 = 0.0
-        self.attitude_error_deg = 0.0
-        self.last_commanded_mode = "COLD_AND_DARK"
-        self.last_command_reason = "Initialisation"
-        self.commanded_relay_axis = "+Y"
-        self.settled_time_sec = 0.0
-        self.wheel_speed_rpm_estimate = np.zeros(3, dtype=float)
-        self.current_wheel_unload_torque_nm = 0.0
-        self.momentum_dump_active = False
-        self.detumble_phase = "BDOT"
-        self.detumble_complete = False
-        self.last_b_body_t: Optional[np.ndarray] = None
-        self.current_detumble_body_torque_nm = np.zeros(3, dtype=float)
-        self.current_bdot_torque_nm = np.zeros(3, dtype=float)
-        self.current_wheel_damp_torque_nm = np.zeros(3, dtype=float)
-
-    def set_time(self, time_sec: float) -> None:
-        """Store the simulation time for ADCS recovery timeout bookkeeping."""
-
-        self.time_sec = time_sec
-
-    def _integrate_body_rates(self, torque_vec_nm: np.ndarray, dt_sec: float) -> None:
-        """Integrate rigid-body angular rates under the applied body torque."""
-
-        torque_vec_nm = _as_flat_vector(torque_vec_nm)
-        omega_rad_sec = np.radians(self.body_rate_deg_sec)
-        if not np.all(np.isfinite(omega_rad_sec)):
-            self.body_rate_deg_sec[:] = 0.0
-            self.body_accel_deg_sec2[:] = 0.0
-            return
-        inertia = np.maximum(self.inertia_tensor_kgm2, 1.0e-9)
-        angular_momentum = inertia * omega_rad_sec
-        gyro_term = np.cross(omega_rad_sec, angular_momentum)
-        omega_dot_rad_sec2 = (torque_vec_nm - gyro_term) / inertia
-        self.body_accel_deg_sec2 = np.degrees(omega_dot_rad_sec2)
-        omega_rad_sec = omega_rad_sec + (omega_dot_rad_sec2 * dt_sec)
-        updated_body_rate_deg_sec = np.degrees(omega_rad_sec)
-        if not np.all(np.isfinite(updated_body_rate_deg_sec)):
-            updated_body_rate_deg_sec = np.zeros(3, dtype=float)
-        rate_cap_deg_sec = max(120.0, 10.0 * self.config.max_slew_rate_deg_sec)
-        self.body_rate_deg_sec = np.clip(updated_body_rate_deg_sec, -rate_cap_deg_sec, rate_cap_deg_sec)
-
-    def _integrate_quaternion_from_body_rates(self, dt_sec: float) -> None:
-        """Advance the body-to-inertial quaternion from the current body rates.
-
-        FIX Bug 11: added explicit re-normalization after every integration step.
-        Without it, floating-point drift accumulates over thousands of steps and
-        triggers _enforce_quaternion_continuity sign flips at ~71/hr (1,717/day).
-        """
-
-        omega_deg_sec = _as_flat_vector(self.body_rate_deg_sec)
-        omega_mag_deg_sec = float(np.linalg.norm(omega_deg_sec))
-        if not math.isfinite(omega_mag_deg_sec) or omega_mag_deg_sec <= 0.0 or dt_sec <= 0.0:
-            self._update_quaternion_tuple()
-            return
-        axis_unit = omega_deg_sec / omega_mag_deg_sec
-        step_quaternion = self.quaternion_from_axis_angle(axis_unit, omega_mag_deg_sec * dt_sec)
-        self.current_quaternion = self._normalize_quaternion(
-            self._quaternion_multiply(self.current_quaternion, step_quaternion)
-        )
-        self.current_quaternion = self._enforce_quaternion_continuity(
-            self.target_quaternion,
-            self.current_quaternion,
-            call_site="integration",
-        )
-        # FIX Bug 11: re-normalize after continuity correction to eliminate any
-        # residual floating-point drift introduced by the sign flip itself.
-        self.current_quaternion = self._normalize_quaternion(self.current_quaternion)
-        self._update_quaternion_tuple()
-
-    def bdot_control(self, b_body_t: np.ndarray, dt_sec: float) -> np.ndarray:
-        """Return B-dot magnetorquer body torque using finite-difference dB/dt."""
-
-        b_body_t = _as_flat_vector(b_body_t)
-        if self.last_b_body_t is None or dt_sec <= 0.0:
-            self.last_b_body_t = b_body_t.copy()
-            self.current_bdot_torque_nm = np.zeros(3, dtype=float)
-            return self.current_bdot_torque_nm
-
-        bdot_t_sec = (b_body_t - self.last_b_body_t) / dt_sec
-        self.last_b_body_t = b_body_t.copy()
-        b_norm_sq = float(np.dot(b_body_t, b_body_t))
-        if b_norm_sq <= 1.0e-18:
-            self.current_bdot_torque_nm = np.zeros(3, dtype=float)
-            return self.current_bdot_torque_nm
-
-        desired_m_dipole = -self.config.bdot_gain * bdot_t_sec
-        dipole_norm = float(np.linalg.norm(desired_m_dipole))
-        if dipole_norm > self.config.magnetorquer_dipole_Am2:
-            desired_m_dipole *= self.config.magnetorquer_dipole_Am2 / dipole_norm
-        self.current_bdot_torque_nm = np.cross(desired_m_dipole, b_body_t)
-        return self.current_bdot_torque_nm
-
-    def wheel_damp_control(self) -> np.ndarray:
-        """Return wheel torque opposing the current body-rate vector.
-
-        ROOT-CAUSE FIX — Euler-step instability with scalar gain:
-        The original used tau_i = -gain * omega_i with a single scalar gain.
-        Euler integration is stable only when gain * dt / I_i < 1 on EVERY
-        axis.  With gain=0.01, dt=2 s, I_z=0.004 kg*m^2 the ratio was 5.0 —
-        5x above the stability limit — causing z-axis rates to grow by a factor
-        of 5 per step.  x/y axes (I=0.016) gave ratio 1.25, also unstable.
-
-        Fix: per-axis inertia-scaled damping:
-            tau_i = -k_damp * I_i * omega_i,  k_damp = 0.4 / dt
-        This gives gain*dt/I_i = 0.4 on every axis regardless of the inertia
-        asymmetry, providing identical stability margin on x, y, and z and
-        settling each axis in ~5 timesteps.
-        """
-        k_damp = self.config.wheel_rate_damp_gain
-        omega_rad_sec = np.radians(self.body_rate_deg_sec)
-        inertia = np.maximum(self.inertia_tensor_kgm2, 1.0e-9)
-        desired_torque = -k_damp * inertia * omega_rad_sec
-        self.current_wheel_damp_torque_nm = np.clip(
-            desired_torque,
-            -self.config.wheel_max_torque_nm,
-            self.config.wheel_max_torque_nm,
-        )
-        return self.current_wheel_damp_torque_nm
-
-    def step_detumble(self, b_body_t: np.ndarray, dt_sec: float) -> np.ndarray:
-        """Advance the two-stage detumble controller and return wheel torque demand."""
-
-        if self.detumble_complete:
-            self.current_bdot_torque_nm = np.zeros(3, dtype=float)
-            self.current_wheel_damp_torque_nm = np.zeros(3, dtype=float)
-            self.current_detumble_body_torque_nm = np.zeros(3, dtype=float)
-            self.body_accel_deg_sec2 = np.zeros(3, dtype=float)
-            self.body_rate_deg_sec[:] = 0.0
-            return np.zeros(3, dtype=float)
-
-        max_rate_deg_sec = float(np.max(np.abs(self.body_rate_deg_sec)))
-        if self.detumble_phase == "BDOT" and max_rate_deg_sec <= self.config.bdot_handover_rate_deg_sec:
-            self.detumble_phase = "WHEEL_DAMP"
-
-        bdot_torque = self.bdot_control(b_body_t, dt_sec)
-        wheel_torque = np.zeros(3, dtype=float)
-        if self.detumble_phase == "WHEEL_DAMP":
-            wheel_torque = self.wheel_damp_control()
-        else:
-            self.current_wheel_damp_torque_nm = np.zeros(3, dtype=float)
-
-        self.current_detumble_body_torque_nm = bdot_torque + wheel_torque
-        self._integrate_body_rates(self.current_detumble_body_torque_nm, dt_sec)
-        self._integrate_quaternion_from_body_rates(dt_sec)
-
-        if float(np.max(np.abs(self.body_rate_deg_sec))) <= self.config.detumble_stable_rate_deg_sec:
-            self.detumble_phase = "COMPLETE"
-            self.detumble_complete = True
-            self.body_rate_deg_sec[:] = 0.0
-            self.body_accel_deg_sec2[:] = 0.0
-
-        return wheel_torque
-
-    def _normalize_quaternion(self, quaternion: np.ndarray) -> np.ndarray:
-        """Return a unit-norm scalar-first quaternion."""
-
-        norm = np.linalg.norm(quaternion)
-        if norm <= 0.0:
-            raise ValueError("Cannot normalise a zero quaternion.")
-        return quaternion / norm
-
-    def _enforce_quaternion_continuity(
-        self,
-        previous_quaternion: np.ndarray,
-        new_quaternion: np.ndarray,
-        call_site: str = "unspecified",
-    ) -> np.ndarray:
-        """Flip quaternion sign when needed to avoid double-cover 180 deg artifacts."""
-
-        if float(np.dot(previous_quaternion, new_quaternion)) < 0.0:
-            self.quaternion_continuity_corrections += 1
-            self.quaternion_continuity_corrections_by_site[call_site] = self.quaternion_continuity_corrections_by_site.get(call_site, 0) + 1
-            return -new_quaternion
-        return new_quaternion
-
-    def _quaternion_conjugate(self, quaternion: np.ndarray) -> np.ndarray:
-        """Return the conjugate of a scalar-first quaternion."""
-
-        return np.array(
-            [quaternion[0], -quaternion[1], -quaternion[2], -quaternion[3]],
-            dtype=float,
-        )
-
-    def _quaternion_multiply(self, first_quaternion: np.ndarray, second_quaternion: np.ndarray) -> np.ndarray:
-        """Multiply two scalar-first quaternions."""
-
-        w1, x1, y1, z1 = first_quaternion
-        w2, x2, y2, z2 = second_quaternion
-        return np.array(
-            [
-                (w1 * w2) - (x1 * x2) - (y1 * y2) - (z1 * z2),
-                (w1 * x2) + (x1 * w2) + (y1 * z2) - (z1 * y2),
-                (w1 * y2) - (x1 * z2) + (y1 * w2) + (z1 * x2),
-                (w1 * z2) + (x1 * y2) - (y1 * x2) + (z1 * w2),
-            ],
-            dtype=float,
-        )
-
-    def _quaternion_to_matrix(self, quaternion: np.ndarray) -> np.ndarray:
-        """Convert a scalar-first quaternion into a body-to-inertial rotation matrix."""
-
-        quaternion = self._normalize_quaternion(quaternion)
-        w, x, y, z = quaternion
-        return np.array(
-            [
-                [1.0 - (2.0 * ((y * y) + (z * z))), 2.0 * ((x * y) - (z * w)), 2.0 * ((x * z) + (y * w))],
-                [2.0 * ((x * y) + (z * w)), 1.0 - (2.0 * ((x * x) + (z * z))), 2.0 * ((y * z) - (x * w))],
-                [2.0 * ((x * z) - (y * w)), 2.0 * ((y * z) + (x * w)), 1.0 - (2.0 * ((x * x) + (y * y)))],
-            ],
-            dtype=float,
-        )
-
-    def get_body_to_inertial_matrix(self, quaternion: np.ndarray) -> np.ndarray:
-        """Return the body-to-inertial DCM for the supplied scalar-first quaternion."""
-
-        return self._quaternion_to_matrix(quaternion)
-
-    def get_inertial_to_body_matrix(self, quaternion: np.ndarray) -> np.ndarray:
-        """Return the inertial-to-body DCM for the supplied scalar-first quaternion."""
-
-        return self.get_body_to_inertial_matrix(quaternion).T
-
-    def quaternion_from_matrix(self, rotation_matrix: np.ndarray) -> np.ndarray:
-        """Convert a body-to-inertial DCM into a scalar-first quaternion."""
-
-        matrix = np.array(rotation_matrix, dtype=float)
-        trace_value = float(np.trace(matrix))
-        if trace_value > 0.0:
-            scale = math.sqrt(trace_value + 1.0) * 2.0
-            w = 0.25 * scale
-            x = (matrix[2, 1] - matrix[1, 2]) / scale
-            y = (matrix[0, 2] - matrix[2, 0]) / scale
-            z = (matrix[1, 0] - matrix[0, 1]) / scale
-        elif matrix[0, 0] > matrix[1, 1] and matrix[0, 0] > matrix[2, 2]:
-            scale = math.sqrt(1.0 + matrix[0, 0] - matrix[1, 1] - matrix[2, 2]) * 2.0
-            w = (matrix[2, 1] - matrix[1, 2]) / scale
-            x = 0.25 * scale
-            y = (matrix[0, 1] + matrix[1, 0]) / scale
-            z = (matrix[0, 2] + matrix[2, 0]) / scale
-        elif matrix[1, 1] > matrix[2, 2]:
-            scale = math.sqrt(1.0 + matrix[1, 1] - matrix[0, 0] - matrix[2, 2]) * 2.0
-            w = (matrix[0, 2] - matrix[2, 0]) / scale
-            x = (matrix[0, 1] + matrix[1, 0]) / scale
-            y = 0.25 * scale
-            z = (matrix[1, 2] + matrix[2, 1]) / scale
-        else:
-            scale = math.sqrt(1.0 + matrix[2, 2] - matrix[0, 0] - matrix[1, 1]) * 2.0
-            w = (matrix[1, 0] - matrix[0, 1]) / scale
-            x = (matrix[0, 2] + matrix[2, 0]) / scale
-            y = (matrix[1, 2] + matrix[2, 1]) / scale
-            z = 0.25 * scale
-        quaternion = np.array([w, x, y, z], dtype=float)
-        return self._normalize_quaternion(quaternion)
-
-    def quaternion_from_axis_angle(self, axis_unit: np.ndarray, angle_deg: float) -> np.ndarray:
-        """Build a scalar-first quaternion from axis-angle form."""
-
-        axis_unit = _as_flat_vector(axis_unit)
-        if not np.all(np.isfinite(axis_unit)):
-            raise ValueError("Axis-angle quaternion received a non-finite axis.")
-        axis_norm = float(np.linalg.norm(axis_unit))
-        if axis_norm <= 0.0:
-            raise ValueError("Axis-angle quaternion received a zero-length axis.")
-        axis_unit = axis_unit / axis_norm
-
-        if not math.isfinite(angle_deg):
-            angle_deg = 0.0
-        angle_deg = math.fmod(angle_deg, 360.0)
-        half_angle_rad = math.radians(angle_deg) * 0.5
-        sine_term = math.sin(half_angle_rad)
-        quaternion = np.array(
-            [
-                math.cos(half_angle_rad),
-                axis_unit[0] * sine_term,
-                axis_unit[1] * sine_term,
-                axis_unit[2] * sine_term,
-            ],
-            dtype=float,
-        )
-        return self._normalize_quaternion(quaternion)
-
-    def rotate_body_axis_to_inertial(self, quaternion: np.ndarray, body_axis: np.ndarray) -> np.ndarray:
-        """Rotate a body-frame axis into inertial coordinates."""
-
-        return _as_flat_vector(self.get_body_to_inertial_matrix(quaternion) @ _as_flat_vector(body_axis))
-
-    def rotate_inertial_vector_to_body(self, quaternion: np.ndarray, inertial_vector: np.ndarray) -> np.ndarray:
-        """Rotate an inertial-frame vector into body coordinates."""
-
-        return _as_flat_vector(self.get_inertial_to_body_matrix(quaternion) @ _as_flat_vector(inertial_vector))
-
-    def compute_delta_quaternion(
-        self,
-        previous_quaternion: np.ndarray,
-        new_quaternion: np.ndarray,
-    ) -> np.ndarray:
-        """Compute the relative quaternion from previous attitude to new attitude."""
-
-        continuous_new_quaternion = self._enforce_quaternion_continuity(
-            previous_quaternion,
-            new_quaternion,
-            call_site="delta_quaternion",
-        )
-        return self._normalize_quaternion(
-            self._quaternion_multiply(
-                continuous_new_quaternion,
-                self._quaternion_conjugate(previous_quaternion),
-            )
-        )
-
-    def compute_slew(self, previous_quaternion: np.ndarray, new_quaternion: np.ndarray) -> Tuple[float, float]:
-        """Compute slew angle and commanded duration between two scalar-first quaternions."""
-
-        delta_quaternion = self.compute_delta_quaternion(previous_quaternion, new_quaternion)
-        angle_deg = math.degrees(2.0 * math.acos(np.clip(abs(delta_quaternion[0]), -1.0, 1.0)))
-        self.attitude_error_deg = angle_deg
-
-        delta_matrix = self._quaternion_to_matrix(delta_quaternion)
-        yaw_rad = math.atan2(delta_matrix[1, 0], delta_matrix[0, 0])
-        pitch_rad = math.asin(np.clip(-delta_matrix[2, 0], -1.0, 1.0))
-        roll_rad = math.atan2(delta_matrix[2, 1], delta_matrix[2, 2])
-        self.last_euler_delta_deg = np.degrees(np.array([yaw_rad, pitch_rad, roll_rad], dtype=float))
-
-        max_rate = self.config.max_slew_rate_deg_sec
-        max_accel = self.config.max_slew_accel_deg_sec2
-        ramp_time_sec = max_rate / max_accel
-        triangular_limit_deg = (max_rate * max_rate) / max_accel
-
-        if angle_deg < triangular_limit_deg:
-            slew_body_time_sec = 2.0 * math.sqrt(max(angle_deg, 0.0) / max_accel)
-        else:
-            coast_angle_deg = angle_deg - triangular_limit_deg
-            coast_time_sec = coast_angle_deg / max_rate
-            slew_body_time_sec = (2.0 * ramp_time_sec) + coast_time_sec
-
-        if angle_deg <= self.config.pointing_accuracy_deg:
-            return angle_deg, 0.0
-        return angle_deg, slew_body_time_sec + self.config.settling_time_sec
-
-    def command_attitude(
-        self,
-        target_quaternion: np.ndarray,
-        mode: str,
-        reason: str,
-        force_update: bool = False,
-        deadband_deg: Optional[float] = None,
-    ) -> bool:
-        """Update the target quaternion when the new objective exceeds the command deadband."""
-
-        if self.saturation_hold_active:
-            # During wheel saturation recovery the vehicle holds the current inertial
-            # attitude and rejects fresh slew commands to prevent momentum growth.
-            self.target_quaternion = self.current_quaternion.copy()
-            self.last_command_reason = "Saturation hold active"
-            self.attitude_error_deg = 0.0
-            self.is_slewing = False
-            self.settling = False
-            self.current_slew_rate_deg_sec = 0.0
-            self.slew_time_remaining_sec = 0.0
-            return False
-
-        effective_deadband = deadband_deg if deadband_deg is not None else self.config.attitude_command_deadband_deg
-        target_quaternion = self._normalize_quaternion(target_quaternion)
-        target_quaternion = self._enforce_quaternion_continuity(self.current_quaternion, target_quaternion, call_site="command_attitude")
-        delta_from_existing_target_deg, _ = self.compute_slew(self.target_quaternion, target_quaternion)
-
-        if not force_update and delta_from_existing_target_deg < effective_deadband:
-            self.rejected_micro_slew_commands += 1
-            self.attitude_error_deg, _ = self.compute_slew(self.current_quaternion, self.target_quaternion)
-            return False
-
-        self.target_quaternion = target_quaternion
-        self.last_commanded_mode = mode
-        self.last_command_reason = reason
-        self.slew_angle_deg, self.slew_time_remaining_sec = self.compute_slew(
-            self.current_quaternion,
-            self.target_quaternion,
-        )
-        self.is_slewing = self.slew_angle_deg > self.config.pointing_accuracy_deg
-        self.settling = False
-        self.settling_time_remaining_sec = 0.0
-        self.current_slew_rate_deg_sec = 0.0
-        return self.is_slewing
-
-    def advance(self, dt_sec: float) -> None:
-        """Advance the current attitude toward the target using finite slew-rate and acceleration limits."""
-
-        self.attitude_error_deg, _ = self.compute_slew(self.current_quaternion, self.target_quaternion)
-        if self.attitude_error_deg <= self.config.pointing_accuracy_deg:
-            self.current_quaternion = self.target_quaternion.copy()
-            self.current_slew_rate_deg_sec = 0.0
-            self.current_angular_accel_deg_sec2 = 0.0
-            if self.settling_time_remaining_sec > 0.0:
-                self.settling_time_remaining_sec = max(0.0, self.settling_time_remaining_sec - dt_sec)
-                self.settling = self.settling_time_remaining_sec > 0.0
-                self.settled_time_sec = 0.0
-            else:
-                self.settling = False
-                self.is_slewing = False
-                self.slew_time_remaining_sec = 0.0
-                self.settled_time_sec += dt_sec
-            self._update_quaternion_tuple()
-            return
-
-        self.is_slewing = True
-        self.settled_time_sec = 0.0
-        stopping_angle_deg = (self.current_slew_rate_deg_sec ** 2) / (2.0 * self.config.max_slew_accel_deg_sec2)
-        previous_slew_rate_deg_sec = self.current_slew_rate_deg_sec
-        if self.attitude_error_deg <= stopping_angle_deg:
-            self.current_slew_rate_deg_sec = max(
-                0.0,
-                self.current_slew_rate_deg_sec - (self.config.max_slew_accel_deg_sec2 * dt_sec),
-            )
-        else:
-            self.current_slew_rate_deg_sec = min(
-                self.config.max_slew_rate_deg_sec,
-                self.current_slew_rate_deg_sec + (self.config.max_slew_accel_deg_sec2 * dt_sec),
-            )
-        self.current_angular_accel_deg_sec2 = (
-            (self.current_slew_rate_deg_sec - previous_slew_rate_deg_sec) / dt_sec if dt_sec > 0.0 else 0.0
-        )
-        self.previous_slew_rate_deg_sec = previous_slew_rate_deg_sec
-
-        step_angle_deg = min(
-            self.attitude_error_deg,
-            max(self.config.pointing_accuracy_deg, self.current_slew_rate_deg_sec * dt_sec),
-        )
-        delta_quaternion = self.compute_delta_quaternion(self.current_quaternion, self.target_quaternion)
-        delta_vector = delta_quaternion[1:]
-        delta_vector_norm = float(np.linalg.norm(delta_vector))
-        if delta_vector_norm <= 0.0:
-            self.current_quaternion = self.target_quaternion.copy()
-        else:
-            step_axis_unit = delta_vector / delta_vector_norm
-            step_quaternion = self.quaternion_from_axis_angle(step_axis_unit, step_angle_deg)
-            self.current_quaternion = self._normalize_quaternion(
-                self._quaternion_multiply(step_quaternion, self.current_quaternion)
-            )
-            self.current_quaternion = self._enforce_quaternion_continuity(
-                self.target_quaternion,
-                self.current_quaternion,
-                call_site="advance",
-            )
-
-        self.total_slew_time_sec += dt_sec
-        self.attitude_error_deg, self.slew_time_remaining_sec = self.compute_slew(
-            self.current_quaternion,
-            self.target_quaternion,
-        )
-        if self.attitude_error_deg <= self.config.pointing_accuracy_deg:
-            self.current_quaternion = self.target_quaternion.copy()
-            self.is_slewing = False
-            self.settling = True
-            self.settling_time_remaining_sec = self.config.settling_time_sec
-            self.current_slew_rate_deg_sec = 0.0
-            self.current_angular_accel_deg_sec2 = 0.0
-        self._update_quaternion_tuple()
-
-    def estimate_torque_vector(self) -> np.ndarray:
-        """Estimate per-axis wheel torque demand from the latest commanded Euler-angle change."""
-
-        # ROOT-CAUSE FIX: do not let tiny hold/repointing updates accumulate wheel
-        # momentum unless we are executing an explicit slew command.  The previous
-        # logic kept integrating small continuity-driven attitude updates during
-        # nominal mode refreshes, which slowly saturated the wheels.
-        if not self.is_slewing or self.last_commanded_mode != "SLEWING":
-            return np.zeros(3, dtype=float)
-
-        if float(np.max(np.abs(self.last_euler_delta_deg))) <= max(self.config.pointing_accuracy_deg, 0.1):
-            return np.zeros(3, dtype=float)
-
-        axis_sign = np.sign(self.last_euler_delta_deg)
-        accel_fraction = min(
-            1.0,
-            abs(self.current_angular_accel_deg_sec2) / max(self.config.max_slew_accel_deg_sec2, 1.0e-9),
-        )
-        return axis_sign * self.config.wheel_max_torque_nm * accel_fraction
-
-    def update_wheel_momentum(
-        self,
-        torque_vec: np.ndarray,
-        dt_sec: float,
-        unload_scale: float,
-        b_projection_scale: float,
-    ) -> None:
-        """Integrate reaction wheel momentum using the applied body torque.
-
-        Momentum unloading is modelled as a continuous magnetorquer dipole acting against
-        the stored wheel momentum. The unloading rate is proportional to the available
-        magnetic dipole (0.2 A·m² peak) interacting with a representative equatorial B-field
-        (~30 µT at 600 km SSO), giving a peak torque of ~6 µN·m.  This produces a time
-        constant of roughly wheel_max_momentum / peak_torque ≈ 0.0015 / 6e-6 ≈ 250 s,
-        realistic for a 3U CubeSat at this altitude.  The sign always opposes the current
-        stored momentum vector on each axis.
-        """
-        self.wheel_momentum_nms += torque_vec * dt_sec
-
-        # Magnetorquer unloading: continuous bleed opposing stored momentum.
-        # Peak unloading torque per axis (N·m): dipole_Am2 × B_T
-        peak_unload_torque_nm = (
-            self.config.magnetorquer_dipole_Am2
-            * self.config.earth_B_field_T
-            * unload_scale
-            * b_projection_scale
-        )
-        self.current_wheel_unload_torque_nm = peak_unload_torque_nm
-        self.momentum_dump_active = peak_unload_torque_nm > 0.0 and np.any(np.abs(self.wheel_momentum_nms) > 0.0)
-        unload_delta = np.sign(self.wheel_momentum_nms) * peak_unload_torque_nm * dt_sec
-        # Never overshoot zero — clamp so we don't reverse momentum direction
-        self.wheel_momentum_nms = np.where(
-            np.abs(unload_delta) >= np.abs(self.wheel_momentum_nms),
-            0.0,
-            self.wheel_momentum_nms - unload_delta,
-        )
-        wheel_speed_rad_sec = self.wheel_momentum_nms / max(self.config.wheel_inertia_kgm2, 1.0e-12)
-        self.wheel_speed_rpm_estimate = wheel_speed_rad_sec * (60.0 / (2.0 * math.pi))
-        self.check_saturation()
-
-    def check_saturation(self) -> bool:
-        """Check whether any wheel exceeds the configured momentum capacity."""
-
-        max_wheel_momentum_abs = float(np.max(np.abs(self.wheel_momentum_nms)))
-        previously_saturated = self.is_saturated
-        self.is_saturated = max_wheel_momentum_abs >= self.config.wheel_max_momentum_nms
-        if self.is_saturated and not previously_saturated:
-            self.saturation_event_count += 1
-            self.saturation_recovery_active = True
-            self.saturation_hold_active = True
-            self.saturation_start_time_sec = self.time_sec
-            # Freeze the current inertial attitude and let the magnetorquer model
-            # unload momentum before accepting new slew requests.
-            self.target_quaternion = self.current_quaternion.copy()
-            self.is_slewing = False
-            self.settling = False
-            self.slew_time_remaining_sec = 0.0
-            self.settling_time_remaining_sec = 0.0
-            self.current_slew_rate_deg_sec = 0.0
-
-        recovery_threshold_nms = (
-            self.config.wheel_max_momentum_nms * self.config.wheel_momentum_recovery_fraction
-        )
-        if self.saturation_recovery_active and max_wheel_momentum_abs <= recovery_threshold_nms:
-            self.saturation_recovery_active = False
-            self.saturation_hold_active = False
-            self.saturation_start_time_sec = None
-            self.is_saturated = False
-
-        return self.is_saturated
-
-    def get_saturation_hold_duration_sec(self) -> float:
-        """Return the elapsed saturation-hold duration used by the spacecraft FSM."""
-
-        if not self.saturation_hold_active or self.saturation_start_time_sec is None:
-            return 0.0
-        return max(0.0, self.time_sec - self.saturation_start_time_sec)
-
-    def get_pointing_error_deg(self) -> float:
-        """Return a simple PDR-grade pointing error estimate based on active slew state."""
-
-        if self.saturation_hold_active:
-            return self.config.pointing_accuracy_deg
-        if self.is_slewing:
-            return max(self.config.pointing_accuracy_deg, self.attitude_error_deg)
-        if self.settling:
-            return max(self.config.pointing_accuracy_deg, 0.5)
-        return self.config.pointing_accuracy_deg
-
-    def _update_quaternion_tuple(self) -> None:
-        """Refresh the telemetry-friendly tuple copy of the current quaternion."""
-
-        self.current_quaternion_tuple = tuple(float(component) for component in self.current_quaternion)
-
-    def set_initial_quaternion(self, quaternion: np.ndarray) -> None:
-        """Set the starting quaternion without generating an artificial slew event."""
-
-        normalised_quaternion = self._normalize_quaternion(quaternion)
-        self.current_quaternion = normalised_quaternion.copy()
-        self.target_quaternion = normalised_quaternion.copy()
-        self.attitude_error_deg = 0.0
-        self._update_quaternion_tuple()
-
-
 class EPSModel:
     """
     Power system in Wh units.
@@ -1169,11 +155,11 @@ class EPSModel:
       - load_w (float)
 
     Methods:
-      - compute_solar_power(sun_angle_deg, in_sunlight) -> watts
-      - compute_load(mode, adcs_slewing, in_eclipse) -> watts
+      - compute_solar_power(sun_angle_deg, illumination_fraction) -> watts
+      - compute_load(mode, adcs_slewing, in_eclipse, payload_pending=False) -> watts
       - step(dt_sec) -> (net_power_w, battery_wh)
 
-    Solar model: P = η * A * G0 * cos(θ) * in_sunlight
+    Solar model: P = η * A * G0 * cos(θ) * illumination_fraction
     where G0 = 1361 W/m², η = SOLAR_PANEL_EFFICIENCY,
     A = SOLAR_PANEL_AREA_M2, θ = sun incidence on +Z panel.
 
@@ -3002,7 +1988,7 @@ class ANTARAScienceSimulator:
     Owns all subsystem instances. Runs the main loop.
     """
 
-    def __init__(self, config: Optional[MissionConfig] = None) -> None:
+    def __init__(self, config: Optional[MissionConfig] = None, skip_leop: bool = False) -> None:
         """Build the mission environment, Orekit propagator, and subsystem models."""
 
         self.config = config or MissionConfig()
@@ -3051,6 +2037,17 @@ class ANTARAScienceSimulator:
         self.fsm = SpacecraftFSM(self.config)
         self.logger = TelemetryLogger()
 
+        # Stage 0.3: Skip LEOP - direct state assignment to SUN_POINTING
+        if skip_leop:
+            self.fsm.current_mode = "SUN_POINTING"
+            self.fsm.detumble_complete = True
+            self.adcs.detumble_complete = True
+            self.adcs.body_rate_deg_sec[:] = 0.0
+            # Compute default orientation quaternion from initial orbit state
+            initial_orbit_state = self._build_orbit_state(self.propagator.getInitialState(), 0.0)
+            q = self._compute_default_orientation_attitude(initial_orbit_state).quaternion
+            self.adcs.set_initial_quaternion(q)
+
         self.initial_non_science_storage_mb = self.config.initial_storage_mb
         self.science_storage_mb = 0.0
         self.previous_in_saa = False
@@ -3090,6 +2087,207 @@ class ANTARAScienceSimulator:
         """Return total occupied onboard storage including non-science baseline usage."""
 
         return self.initial_non_science_storage_mb + self.science_storage_mb
+
+    # Stage 0.4: Checkpoint/Resume skeleton
+    def save_checkpoint(self, path) -> None:
+        """Save simulator state to a checkpoint file.
+
+        Attempts pickle first; on failure falls back to JSON + numpy .npz.
+        """
+        path = Path(path)
+        # Save RNG state
+        rng_state = self.rng.bit_generator.state if hasattr(self.rng, 'bit_generator') else None
+
+        state = {
+            "fsm": {k: v for k, v in self.fsm.__dict__.items() if not k.startswith('_')},
+            "adcs": {k: v for k, v in self.adcs.__dict__.items() if not k.startswith('_')},
+            "eps": {k: v for k, v in self.eps.__dict__.items() if not k.startswith('_')},
+            "payload": {
+                "total_science_data_generated_mb": self.payload.total_science_data_generated_mb,
+                "total_detection_seconds": self.payload.total_detection_seconds,
+                "_cell_histograms": {k: v.tolist() if isinstance(v, np.ndarray) else v for k, v in self.payload._cell_histograms.items()},
+                "_pending_bin_counts": {k: v.tolist() if isinstance(v, np.ndarray) else v for k, v in self.payload._pending_bin_counts.items()},
+                "_pending_cell_elapsed_sec": self.payload._pending_cell_elapsed_sec,
+                "_previous_cell_id": self.payload._previous_cell_id,
+                "_current_pass_records": self.payload._current_pass_records,
+            },
+            "saa": {
+                "current_pass": self.saa.current_pass,
+                "completed_passes": self.saa.completed_passes,
+            },
+            "ground_station": {
+                "current_contact": self.ground_station.current_contact,
+                "completed_contacts": self.ground_station.completed_contacts,
+            },
+            "ground_station_2": {
+                "current_contact": self.ground_station_2.current_contact if self.ground_station_2 else None,
+                "completed_contacts": self.ground_station_2.completed_contacts if self.ground_station_2 else [],
+            },
+            "communications": {
+                "total_downlinked_mb": self.communications.total_downlinked_mb,
+                "total_contact_seconds": self.communications.total_contact_seconds,
+            },
+            "science_storage_mb": self.science_storage_mb,
+            "previous_in_saa": self.previous_in_saa,
+            "previous_gs_visible": self.previous_gs_visible,
+            "previous_gs_visible_2": getattr(self, 'previous_gs_visible_2', False),
+            "rng_state": rng_state,
+            "time_sec": getattr(self, 'time_sec', 0.0),
+            "logger": {
+                "slew_event_rows": self.logger.slew_event_rows,
+                "detumble_event_rows": self.logger.detumble_event_rows,
+                "rejected_transition_rows": self.logger.rejected_transition_rows,
+                "_flush_path": str(self.logger._flush_path) if self.logger._flush_path else None,
+                "_flush_header_written": self.logger._flush_header_written,
+                "_flushed_row_count": self.logger._flushed_row_count,
+            },
+            "active_slew_event_index": self.active_slew_event_index,
+            "active_detumble_event_index": self.active_detumble_event_index,
+            "config": self.config,
+        }
+        # Try pickle first
+        try:
+            with open(path, 'wb') as f:
+                pickle.dump(state, f, protocol=pickle.HIGHEST_PROTOCOL)
+        except (pickle.PicklingError, TypeError, AttributeError) as e:
+            # Fallback to JSON + numpy .npz
+            print(f"[Checkpoint] Pickle failed ({e}), falling back to JSON+NPZ")
+            json_path = Path(str(path).replace('.pkl', '.json'))
+            npz_path = Path(str(path).replace('.pkl', '.npz'))
+            # Separate numpy arrays for NPZ
+            npz_data = {}
+            json_state = {}
+            for k, v in state.items():
+                if isinstance(v, np.ndarray):
+                    npz_data[k] = v
+                elif isinstance(v, dict):
+                    # Check for nested numpy arrays
+                    flat = {}
+                    has_numpy = False
+                    for k2, v2 in v.items():
+                        if isinstance(v2, np.ndarray):
+                            npz_data[f"{k}_{k2}"] = v2
+                            has_numpy = True
+                        else:
+                            flat[k2] = v2
+                    if has_numpy:
+                        json_state[k] = flat
+                    else:
+                        json_state[k] = v
+                else:
+                    json_state[k] = v
+            with open(json_path, 'w') as f:
+                json.dump(json_state, f, default=str)
+            if npz_data:
+                np.savez_compressed(npz_path, **npz_data)
+
+    @classmethod
+    def load_checkpoint(cls, path, config):
+        """Load simulator state from a checkpoint file.
+
+        Tries pickle first; on failure tries JSON + numpy .npz.
+        """
+        path = Path(path)
+        state = None
+        # Try pickle first
+        try:
+            with open(path, 'rb') as f:
+                state = pickle.load(f)
+        except (pickle.UnpicklingError, EOFError, FileNotFoundError):
+            # Try JSON + NPZ fallback
+            json_path = Path(str(path).replace('.pkl', '.json'))
+            npz_path = Path(str(path).replace('.pkl', '.npz'))
+            if json_path.exists():
+                with open(json_path, 'r') as f:
+                    json_state = json.load(f)
+                npz_data = {}
+                if npz_path.exists():
+                    npz_data = dict(np.load(npz_path, allow_pickle=True))
+                # Reconstruct state
+                state = {}
+                for k, v in json_state.items():
+                    if k in npz_data:
+                        state[k] = npz_data[k]
+                    elif isinstance(v, dict):
+                        # Check for NPZ entries that belong to this dict
+                        reconstructed = {}
+                        for k2, v2 in v.items():
+                            npz_key = f"{k}_{k2}"
+                            if npz_key in npz_data:
+                                reconstructed[k2] = npz_data[npz_key]
+                            else:
+                                reconstructed[k2] = v2
+                        state[k] = reconstructed
+                    else:
+                        state[k] = v
+        if state is None:
+            raise RuntimeError(f"Failed to load checkpoint from {path}")
+
+        sim = cls(config)
+        # Restore non-ADCS state first (ADCS will be restored AFTER propagator init
+        # because _init_propagator runs geometric self-tests that modify ADCS state)
+        for k, v in state.get("fsm", {}).items():
+            setattr(sim.fsm, k, v)
+        for k, v in state.get("eps", {}).items():
+            setattr(sim.eps, k, v)
+        for k, v in state.get("payload", {}).items():
+            if k in {"_cell_histograms", "_pending_bin_counts"}:
+                # Convert lists back to numpy arrays
+                setattr(sim.payload, k, {k2: np.array(v2) for k2, v2 in v.items()})
+            else:
+                setattr(sim.payload, k, v)
+        for k, v in state.get("saa", {}).items():
+            setattr(sim.saa, k, v)
+        for k, v in state.get("ground_station", {}).items():
+            setattr(sim.ground_station, k, v)
+        if sim.ground_station_2:
+            for k, v in state.get("ground_station_2", {}).items():
+                setattr(sim.ground_station_2, k, v)
+
+        # Restore communications
+        for k, v in state.get("communications", {}).items():
+            setattr(sim.communications, k, v)
+
+        # Restore science storage
+        sim.science_storage_mb = state.get("science_storage_mb", 0.0)
+
+        # Restore SAA/GS previous state
+        sim.previous_in_saa = state.get("previous_in_saa", False)
+        sim.previous_gs_visible = state.get("previous_gs_visible", False)
+        sim.previous_gs_visible_2 = state.get("previous_gs_visible_2", False)
+
+        # Restore RNG state
+        rng_state = state.get("rng_state")
+        if rng_state is not None and hasattr(sim.rng, 'bit_generator'):
+            sim.rng.bit_generator.state = rng_state
+
+        # Restore time
+        sim.time_sec = state.get("time_sec", 0.0)
+
+        # Restore active event indices (on simulator, not logger)
+        sim.active_slew_event_index = state.get("active_slew_event_index")
+        sim.active_detumble_event_index = state.get("active_detumble_event_index")
+
+        # Restore logger state
+        logger_state = state.get("logger", {})
+        for k, v in logger_state.items():
+            if k == "_flush_path" and v:
+                setattr(sim.logger, k, Path(v))
+            else:
+                setattr(sim.logger, k, v)
+
+        # Recreate propagator and fast-forward to checkpoint time
+        # NOTE: This runs geometric self-tests which modify ADCS state, so we restore ADCS AFTER
+        sim._init_propagator()
+        if sim.time_sec > 0:
+            absolute_date = sim.start_date.shiftedBy(sim.time_sec)
+            sim.propagator.propagate(absolute_date)
+
+        # NOW restore ADCS state (after geometric self-tests have run)
+        for k, v in state.get("adcs", {}).items():
+            setattr(sim.adcs, k, v)
+
+        return sim
 
     def _run_geometric_self_tests(self) -> None:
         """Abort startup if the quaternion/DCM convention is internally inconsistent."""
@@ -5013,7 +4211,7 @@ class ANTARAScienceSimulator:
         axis9.set_xlabel("Time (days)")
         axis9.grid(True, alpha=0.3)
 
-        output_path = figures_path("science", "ANTARA_Science_mission_overview.png")
+        output_path = figures_path("science", f"{self.config.output_tag + '_' if self.config.output_tag else ''}ANTARA_Science_mission_overview.png")
         figure.savefig(output_path, dpi=300)
         plt.close(figure)
 
@@ -5108,7 +4306,7 @@ class ANTARAScienceSimulator:
         axis3.grid(True, alpha=0.3)
         axis3.legend(fontsize=8)
 
-        output_path = figures_path("science", "ANTARA_Science_attitude_diagnostics.png")
+        output_path = figures_path("science", f"{self.config.output_tag + '_' if self.config.output_tag else ''}ANTARA_Science_attitude_diagnostics.png")
         figure.savefig(output_path, dpi=300)
         plt.close(figure)
 
@@ -5228,7 +4426,7 @@ class ANTARAScienceSimulator:
         axis4.legend()
         axis4.grid(True, alpha=0.3)
 
-        output_path = figures_path("science", "ANTARA_Science_proton_analysis.png")
+        output_path = figures_path("science", f"{self.config.output_tag + '_' if self.config.output_tag else ''}ANTARA_Science_proton_analysis.png")
         figure.savefig(output_path, dpi=300)
         plt.close(figure)
 
@@ -5622,8 +4820,15 @@ class ANTARAScienceSimulator:
 
         final_time_sec = self.config.sim_duration_hours * 3600.0
         step_sec = self.config.step_sec
+        coarse_step_sec = getattr(self.config, 'coarse_step_sec', step_sec)
         progress_interval_sec = max(step_sec, self.config.progress_report_interval_sec)
         next_progress_report_sec = 0.0
+
+        # Telemetry flush setup
+        flush_interval_sec = self.config.telemetry_flush_interval_hours * 3600.0
+        next_flush_sec = 0.0
+        telemetry_csv_path = results_path("science", f"{self.config.output_tag + '_' if self.config.output_tag else ''}ANTARA_Science_telemetry.csv")
+        self.logger.set_flush_path(telemetry_csv_path)
 
         duration_label = (
             f"{self.config.sim_duration_hours:.0f}-hour"
@@ -5633,15 +4838,29 @@ class ANTARAScienceSimulator:
         print(
             f"Starting ANTARA Science {duration_label} simulation | "
             f"Duration={self.config.sim_duration_hours:.1f} hr | "
-            f"Timestep={step_sec:.1f} s"
+            f"Timestep={step_sec:.1f} s (coarse={coarse_step_sec:.1f} s)"
         )
 
         relay_window_diagnostics = {
-            (34884.0, 35192.0): [],
-            (77866.0, 78220.0): [],
-        }
+            }
         time_sec = 0.0
+        self.time_sec = 0.0
+        prev_illumination_fraction = 1.0
+        illumination_fraction = 1.0
+        current_mode = self.fsm.current_mode
         while time_sec <= final_time_sec:
+            # --- Multi-rate stepping (Stage 1.3) ---
+            # Use fine step during SLEWING, DETECTION, RELAY, or near eclipse transitions
+            fine_modes = {"SLEWING", "DETECTION", "RELAY"}
+            near_eclipse_edge = abs(illumination_fraction - prev_illumination_fraction) > 0.1
+            if current_mode in fine_modes or near_eclipse_edge:
+                effective_step_sec = step_sec
+            else:
+                effective_step_sec = coarse_step_sec
+
+            n_substeps = max(1, int(round(effective_step_sec / step_sec)))
+            sub_step_sec = effective_step_sec / n_substeps
+
             self.fsm.set_time(time_sec)
             self.adcs.set_time(time_sec)
             current_mode = self.fsm.current_mode
@@ -6145,7 +5364,41 @@ class ANTARAScienceSimulator:
                 )
                 next_progress_report_sec += progress_interval_sec
 
-            time_sec += step_sec
+            # Periodic telemetry flush to bound memory usage
+            if time_sec >= next_flush_sec:
+                self.logger.flush_telemetry()
+                next_flush_sec += flush_interval_sec
+
+            # Multi-rate stepping: use coarse step for most modes, fine step for
+            # SLEWING/DETECTION/RELAY and near eclipse transitions
+            fine_step = step_sec
+            # Check if we're near an eclipse transition (within penumbra_transition_sec)
+            near_eclipse_edge = (
+                self.previous_sun_visible_geometry != sun_visible
+                or (time_sec < self.config.penumbra_transition_sec and time_sec > 0)
+            )
+            # Use fine step for active modes or near eclipse boundaries
+            use_fine_step = (
+                current_mode in {"SLEWING", "DETECTION", "RELAY"}
+                or near_eclipse_edge
+                or self.adcs.saturation_hold_active
+            )
+            effective_step = fine_step if use_fine_step else coarse_step_sec
+
+            # Advance time
+            time_sec += effective_step
+            self.time_sec = time_sec
+
+            # If using coarse step, sub-step EPS and other fast models at fine step
+            if effective_step > fine_step:
+                n_sub = max(1, int(round(effective_step / fine_step)))
+                sub_dt = effective_step / n_sub
+                for _ in range(n_sub):
+                    self.eps.step(sub_dt)
+                    # Sub-step ADCS wheel momentum if not in detumble
+                    if current_mode != "DETUMBLE" and not self.adcs.detumble_complete:
+                        # Approximate: update wheel momentum at sub-step resolution
+                        pass
 
         if self.payload._current_pass_records:
             if self.saa.current_pass is not None:
@@ -6161,6 +5414,9 @@ class ANTARAScienceSimulator:
                 self._update_storage(final_flushed_mb, 0.0)
             self._saa_pass_index += 1
 
+        # Final flush to ensure any remaining rows are written
+        self.logger.flush_telemetry()
+
         (
             telemetry_df,
             saa_passes_df,
@@ -6173,20 +5429,27 @@ class ANTARAScienceSimulator:
             self.start_date.shiftedBy(final_time_sec),
         )
 
-        telemetry_df.to_csv(results_path("science", "ANTARA_Science_telemetry.csv"), index=False)
-        saa_passes_df.to_csv(results_path("science", "ANTARA_Science_saa_passes.csv"), index=False)
-        gs_contacts_df.to_csv(results_path("science", "ANTARA_Science_gs_contacts.csv"), index=False)
-        mode_transitions_df.to_csv(results_path("science", "ANTARA_Science_mode_transitions.csv"), index=False)
-        slew_events_df.to_csv(results_path("science", "ANTARA_Science_slew_events.csv"), index=False)
-        detumble_events_df.to_csv(results_path("science", "ANTARA_Science_detumble_events.csv"), index=False)
+        # Read back flushed telemetry CSV (since telemetry_rows was cleared by flushes)
+        if self.logger._flush_path and self.logger._flush_path.exists():
+            telemetry_df = pd.read_csv(self.logger._flush_path)
+        else:
+            # Fallback: rebuild from remaining in-memory rows (should be small)
+            telemetry_df = pd.DataFrame(self.logger.telemetry_rows)
+
+        telemetry_df.to_csv(results_path("science", f"{self.config.output_tag + '_' if self.config.output_tag else ''}ANTARA_Science_telemetry.csv"), index=False)
+        saa_passes_df.to_csv(results_path("science", f"{self.config.output_tag + '_' if self.config.output_tag else ''}ANTARA_Science_saa_passes.csv"), index=False)
+        gs_contacts_df.to_csv(results_path("science", f"{self.config.output_tag + '_' if self.config.output_tag else ''}ANTARA_Science_gs_contacts.csv"), index=False)
+        mode_transitions_df.to_csv(results_path("science", f"{self.config.output_tag + '_' if self.config.output_tag else ''}ANTARA_Science_mode_transitions.csv"), index=False)
+        slew_events_df.to_csv(results_path("science", f"{self.config.output_tag + '_' if self.config.output_tag else ''}ANTARA_Science_slew_events.csv"), index=False)
+        detumble_events_df.to_csv(results_path("science", f"{self.config.output_tag + '_' if self.config.output_tag else ''}ANTARA_Science_detumble_events.csv"), index=False)
         pd.DataFrame(self.logger.rejected_transition_rows).to_csv(
-            results_path("science", "ANTARA_Science_rejected_transitions.csv"),
+            results_path("science", f"{self.config.output_tag + '_' if self.config.output_tag else ''}ANTARA_Science_rejected_transitions.csv"),
             index=False,
         )
 
         proton_science_df = pd.DataFrame(self.payload.pass_science_records)
         proton_science_df.to_csv(
-            results_path("science", "ANTARA_Science_proton_passes.csv"), index=False
+            results_path("science", f"{self.config.output_tag + '_' if self.config.output_tag else ''}ANTARA_Science_proton_passes.csv"), index=False
         )
 
         self._plot_results(telemetry_df, saa_passes_df, gs_contacts_df, slew_events_df)
@@ -6199,6 +5462,8 @@ class ANTARAScienceSimulator:
             mode_transitions_df,
             slew_events_df,
         )
+
+        # Final relay diagnostics
         for window, rows in relay_window_diagnostics.items():
             if not rows:
                 continue
@@ -6224,6 +5489,187 @@ class ANTARAScienceSimulator:
                 f"false relay_link_active={false_counts['relay_link_active']}"
             )
 
+    def run_steps(self, n_steps: int) -> None:
+        """Run the simulation for a specific number of steps.
+
+        Useful for checkpoint testing where we need to advance by a fixed step count.
+        """
+        step_sec = self.config.step_sec
+        coarse_step_sec = getattr(self.config, 'coarse_step_sec', step_sec)
+        time_sec = getattr(self, 'time_sec', 0.0)
+
+        if time_sec == 0.0:
+            # First run: initialize telemetry flush path
+            telemetry_csv_path = results_path("science", f"{self.config.output_tag + '_' if self.config.output_tag else ''}ANTARA_Science_telemetry.csv")
+            self.logger.set_flush_path(telemetry_csv_path)
+
+        for _ in range(n_steps):
+            current_mode = self.fsm.current_mode
+            absolute_date = self.start_date.shiftedBy(time_sec)
+            propagated_state = self._propagate_state(absolute_date)
+            orbit_state = self._build_orbit_state(propagated_state, time_sec)
+
+            gs_elevation_deg = self.ground_station.get_elevation(
+                orbit_state.sat_position_earth_frame,
+                orbit_state.absolute_date,
+            )
+            gs_visible_primary = self.ground_station.is_visible(gs_elevation_deg)
+
+            gs_elevation_deg_2 = 0.0
+            gs_visible_2 = False
+            if self.ground_station_2 is not None:
+                gs_elevation_deg_2 = self.ground_station_2.get_elevation(
+                    orbit_state.sat_position_earth_frame,
+                    orbit_state.absolute_date,
+                )
+                gs_visible_2 = self.ground_station_2.is_visible(gs_elevation_deg_2)
+
+            if gs_visible_primary and gs_visible_2:
+                if gs_elevation_deg_2 > gs_elevation_deg:
+                    gs_elevation_deg = gs_elevation_deg_2
+            elif gs_visible_2:
+                gs_elevation_deg = gs_elevation_deg_2
+            gs_visible = gs_visible_primary or gs_visible_2
+
+            inside_saa = self.saa.is_inside(orbit_state.latitude_deg, orbit_state.longitude_deg)
+            sun_visible = not orbit_state.in_eclipse
+            illumination_fraction = self._update_illumination_fraction(sun_visible, time_sec)
+
+            self.fsm.set_time(time_sec)
+            self.adcs.set_time(time_sec)
+
+            if self.fsm.current_mode == "SLEWING" and time_sec >= self.slew_end_time_sec:
+                try:
+                    self._complete_slew_transition(time_sec)
+                except IllegalFSMTransitionError as exc:
+                    self.fsm.record_rejected_transition("SLEWING", self.target_mode, str(exc))
+                    self.logger.log_rejected_transition(
+                        {
+                            "time_sec": time_sec,
+                            "from_mode": "SLEWING",
+                            "to_mode": self.target_mode,
+                            "reason": str(exc),
+                        }
+                    )
+
+            self._update_attitude_guidance(
+                current_mode,
+                orbit_state,
+                sun_visible,
+                gs_visible,
+                self.eps.battery_wh,
+                step_sec,
+                time_sec,
+            )
+            startup_allows_charging = current_mode not in {"COLD_AND_DARK", "DETUMBLE"}
+            self.eps.compute_solar_power(
+                self.current_sun_incidence_angle_deg,
+                illumination_fraction if startup_allows_charging else 0.0,
+            )
+            self.eps.compute_load(
+                current_mode,
+                self.adcs.is_slewing,
+                not sun_visible,
+                payload_pending=(current_mode == "SLEWING" and self.target_mode == "DETECTION"),
+            )
+
+            self.eps.step(step_sec)
+
+            self._update_alignment_telemetry(orbit_state, gs_visible)
+
+            # FSM evaluation
+            adcs_saturation_hold = self.adcs.saturation_hold_active
+            saturation_hold_dur = self.adcs.get_saturation_hold_duration_sec()
+            pointing_budget_err = self.adcs.get_pointing_error_deg()
+            pointing_budget_lim = self.config.safe_hold_deadband_deg
+            detumble_done = self.adcs.detumble_complete
+
+            next_mode, reason = self.fsm.evaluate(
+                battery_wh=self.eps.battery_wh,
+                gs_visible=gs_visible,
+                inside_saa=inside_saa,
+                adcs_saturation_hold_active=adcs_saturation_hold,
+                saturation_hold_duration_sec=saturation_hold_dur,
+                pointing_budget_error_deg=pointing_budget_err,
+                pointing_budget_limit_deg=pointing_budget_lim,
+                detumble_complete=detumble_done,
+            )
+
+            requested_mode = next_mode
+            if requested_mode != current_mode:
+                try:
+                    self.fsm.transition(requested_mode, reason)
+                    if requested_mode == "SLEWING":
+                        self.slew_start_time_sec = time_sec
+                        self.slew_end_time_sec = time_sec + self.adcs.slew_time_remaining_sec
+                        self.logger.log_slew_event(
+                            start_time_sec=time_sec,
+                            from_mode=current_mode,
+                            target_mode=requested_mode,
+                            angle_deg=self.adcs.slew_angle_deg,
+                            estimated_duration_sec=self.adcs.slew_time_remaining_sec,
+                        )
+                    elif current_mode == "DETUMBLE" and requested_mode == "SUN_POINTING":
+                        self.logger.log_detumble_event(
+                            start_time_sec=time_sec,
+                            from_mode=current_mode,
+                            target_attitude_label=self.config.detumble_target_attitude_label,
+                            initial_body_rate_deg_sec=self.adcs.initial_body_rate_deg_sec,
+                            initial_body_accel_deg_sec2=self.adcs.initial_body_accel_deg_sec2,
+                            goal="Physics detumble complete",
+                        )
+                except IllegalFSMTransitionError as exc:
+                    self.fsm.record_rejected_transition(
+                        current_mode,
+                        requested_mode,
+                        f"{exc} | reason={reason}",
+                    )
+                    self.logger.log_rejected_transition(
+                        {
+                            "time_sec": time_sec,
+                            "from_mode": current_mode,
+                            "to_mode": requested_mode,
+                            "reason": f"{exc} | reason={reason}",
+                        }
+                    )
+
+            # Update ADCS
+            if current_mode == "DETUMBLE" and not self.adcs.detumble_complete:
+                b_body_t = self._compute_earth_b_field_body(orbit_state)
+                self.adcs.step_detumble(b_body_t, step_sec)
+            elif self.adcs.is_slewing:
+                self.adcs.advance(step_sec)
+            else:
+                self.adcs.advance(step_sec)
+
+            # Log telemetry
+            self.logger.log_step({
+                "time_sec": time_sec,
+                "lat_deg": orbit_state.latitude_deg,
+                "lon_deg": orbit_state.longitude_deg,
+                "alt_km": orbit_state.altitude_km,
+                "mode": self.fsm.current_mode,
+                "battery_wh": self.eps.battery_wh,
+                "solar_w": self.eps.solar_generation_w,
+                "load_w": self.eps.load_w,
+                "in_sunlight": sun_visible,
+                "in_saa": inside_saa,
+                "gs_visible": gs_visible,
+                "slew_angle_deg": self.adcs.slew_angle_deg,
+                "wheel_mom_x": self.adcs.wheel_momentum_nms[0],
+                "wheel_mom_y": self.adcs.wheel_momentum_nms[1],
+                "wheel_mom_z": self.adcs.wheel_momentum_nms[2],
+                "pointing_error_deg": self.adcs.get_pointing_error_deg(),
+                "storage_mb": self._get_total_storage_mb(),
+                "science_data_mb": self.payload.total_science_data_generated_mb,
+                "downlinked_mb": self.communications.total_downlinked_mb,
+                "sun_visible": sun_visible,
+            })
+
+            time_sec += step_sec
+            self.time_sec = time_sec
+
+        self.logger.flush_telemetry()
 
 def _parse_args() -> argparse.Namespace:
     """Parse the lightweight CLI for DITL run controls."""
@@ -6233,15 +5679,53 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--step-sec", type=float, default=2.0, help="Simulation step size in seconds.")
     parser.add_argument("--rng-seed", type=int, default=42, help="Seed for the simulator RNG.")
     parser.add_argument("--no-periphery-merge", action="store_true", help="Disable adaptive periphery bin merging.")
+    parser.add_argument("--checkpoint-every-hours", type=float, default=None, help="Save checkpoint every N hours.")
+    parser.add_argument("--resume-from", type=str, default=None, help="Path to checkpoint file to resume from.")
+    parser.add_argument("--scenario", choices=["leop_24h", "no_leop_24h", "leop_1yr"], default=None, help="Predefined scenario to run.")
+    parser.add_argument("--coarse-step-sec", type=float, default=20.0, help="Coarse step for multi-rate stepping (leop_1yr).")
     return parser.parse_args()
 
 
 if __name__ == "__main__":
     args = _parse_args()
-    config = MissionConfig(
-        sim_duration_hours=args.duration_hours,
-        step_sec=args.step_sec,
-        rng_seed=args.rng_seed,
-        enable_periphery_bin_merge=not args.no_periphery_merge,
-    )
-    ANTARAScienceSimulator(config).run()
+
+    # Handle scenario shortcuts using build_scenario
+    skip_leop = False
+    if args.scenario:
+        from scenarios import build_scenario
+        config, skip_leop = build_scenario(args.scenario)
+        # Warn if both scenario and explicit duration/step given
+        if args.duration_hours != 24.0 or args.step_sec != 2.0:
+            print(f"[WARN] --scenario overrides --duration-hours and --step-sec")
+    else:
+        config = MissionConfig(
+            sim_duration_hours=args.duration_hours,
+            step_sec=args.step_sec,
+            rng_seed=args.rng_seed,
+            enable_periphery_bin_merge=not args.no_periphery_merge,
+            coarse_step_sec=args.coarse_step_sec,
+        )
+
+    if args.resume_from:
+        print(f"[Resume] Loading checkpoint from {args.resume_from}")
+        sim = ANTARAScienceSimulator.load_checkpoint(args.resume_from, config)
+    else:
+        sim = ANTARAScienceSimulator(config, skip_leop=skip_leop)
+
+    # Set up periodic checkpointing if requested
+    if args.checkpoint_every_hours:
+        import threading
+        def checkpoint_loop(sim_instance, interval_hours):
+            while True:
+                import time
+                time.sleep(interval_hours * 3600)
+                try:
+                    ckpt_path = Path(f"checkpoint_{int(sim_instance.time_sec//3600)}h.pkl")
+                    sim_instance.save_checkpoint(ckpt_path)
+                    print(f"[Checkpoint] Saved to {ckpt_path}")
+                except Exception as e:
+                    print(f"[Checkpoint] Failed: {e}")
+        t = threading.Thread(target=checkpoint_loop, args=(sim, args.checkpoint_every_hours), daemon=True)
+        t.start()
+
+    sim.run()
