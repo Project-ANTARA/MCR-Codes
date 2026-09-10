@@ -5,6 +5,11 @@ on:
     branches: [main, develop]
   pull_request:
     branches: [main, develop]
+  schedule:
+    # Nightly at 2 AM UTC
+    - cron: '0 2 * * *'
+    # Weekly on Sundays at 3 AM UTC
+    - cron: '0 3 * * 0'
 
 # Only run one workflow at a time for the same ref
 concurrency:
@@ -42,7 +47,7 @@ jobs:
       - name: Install Python dependencies
         run: |
           pip install --upgrade pip
-          pip install orekit numpy pandas matplotlib cartopy shapely pytest
+          pip install orekit numpy pandas matplotlib cartopy shapely scipy skyfield pytest
 
       - name: Verify Orekit data (download if missing)
         run: |
@@ -75,6 +80,8 @@ jobs:
           print('compare_scenarios imports OK')
           from scenarios import build_scenario
           print('scenarios imports OK')
+          from antara_models import MissionConfig, ADCSModel, SpacecraftFSM
+          print('antara_models imports OK')
           "
 
   # ============================================================
@@ -104,7 +111,7 @@ jobs:
       - name: Install Python dependencies
         run: |
           pip install --upgrade pip
-          pip install orekit numpy pandas matplotlib cartopy shapely pytest
+          pip install orekit numpy pandas matplotlib cartopy shapely scipy skyfield pytest
 
       - name: Run FSM spec drift guard test
         run: |
@@ -116,7 +123,7 @@ jobs:
             python -m py_compile "$f" && echo "OK: $f"
           done
 
-  # ============================================================
+# ============================================================
   # Scenario smoke tests (every commit) - 1 simulated hour each
   # ============================================================
   scenario-smoke:
@@ -146,7 +153,7 @@ jobs:
       - name: Install Python dependencies
         run: |
           pip install --upgrade pip
-          pip install orekit numpy pandas matplotlib cartopy shapely
+          pip install orekit numpy pandas matplotlib cartopy shapely scipy skyfield pytest
 
       - name: Run scenario ${{ matrix.scenario }} (1 hour)
         run: |
@@ -334,13 +341,3 @@ jobs:
           name: validation-data
           path: tests/validation/validation_results_*.json
           retention-days: 90
-
-# ============================================================
-# Scheduled runs
-# ============================================================
-on:
-  schedule:
-    # Nightly at 2 AM UTC
-    - cron: '0 2 * * *'
-    # Weekly on Sundays at 3 AM UTC
-    - cron: '0 3 * * 0'
