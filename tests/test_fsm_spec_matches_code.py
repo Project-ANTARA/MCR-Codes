@@ -26,7 +26,7 @@ def make_fsm(config: MissionConfig) -> SpacecraftFSM:
     return SpacecraftFSM(config)
 
 
-def test_guard(config: MissionConfig, fsm: SpacecraftFSM, **kwargs) -> Tuple[str, str]:
+def _evaluate_guard(config: MissionConfig, fsm: SpacecraftFSM, **kwargs) -> Tuple[str, str]:
     """Run FSM evaluate with given parameters."""
     return fsm.evaluate(
         battery_wh=kwargs.get("battery_wh", config.battery_capacity_wh),
@@ -385,11 +385,11 @@ def run_test_case(fsm: SpacecraftFSM, config: MissionConfig, guard_name: str) ->
 
     # Run evaluate
     if guard_name == "pointing_budget_fault":
-        print(f"DEBUG: Before test_guard")
+        print(f"DEBUG: Before _evaluate_guard")
         print(f"  fsm.current_mode: {fsm.current_mode}")
         print(f"  fsm.pointing_budget_fault_active: {fsm.pointing_budget_fault_active}")
         print(f"  fsm.debounce_counters: {dict(fsm.debounce_counters)}")
-    result = test_guard(config, fsm, **{
+    result = _evaluate_guard(config, fsm, **{
         k: v for k, v in tc.items() if k not in [
             "mode", "target_mode", "time_sec", "slew_end_time_sec",
             "minimum_dwell_complete", "low_power_recovery_debounced",
@@ -402,12 +402,18 @@ def run_test_case(fsm: SpacecraftFSM, config: MissionConfig, guard_name: str) ->
         ]
     })
     if guard_name == "pointing_budget_fault":
-        print(f"DEBUG: After test_guard")
+        print(f"DEBUG: After _evaluate_guard")
         print(f"  result: {result}")
         print(f"  fsm.current_mode: {fsm.current_mode}")
         print(f"  fsm.pointing_budget_fault_active: {fsm.pointing_budget_fault_active}")
         print(f"  fsm.debounce_counters: {dict(fsm.debounce_counters)}")
     return result
+
+
+def test_fsm_spec_matches_code():
+    """Test that FSM specification matches implementation."""
+    success = run_branch_tests()
+    assert success, "FSM specification drift detected"
 
 
 if __name__ == "__main__":

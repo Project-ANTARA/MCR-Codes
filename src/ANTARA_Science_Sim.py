@@ -5452,9 +5452,10 @@ class ANTARAScienceSimulator:
             results_path("science", f"{self.config.output_tag + '_' if self.config.output_tag else ''}ANTARA_Science_proton_passes.csv"), index=False
         )
 
-        self._plot_results(telemetry_df, saa_passes_df, gs_contacts_df, slew_events_df)
-        self._plot_science_results(telemetry_df, saa_passes_df)
-        self._plot_attitude_diagnostics(telemetry_df)
+        if not self.config.no_plots:
+            self._plot_results(telemetry_df, saa_passes_df, gs_contacts_df, slew_events_df)
+            self._plot_science_results(telemetry_df, saa_passes_df)
+            self._plot_attitude_diagnostics(telemetry_df)
         self._print_summary(
             telemetry_df,
             saa_passes_df,
@@ -5683,6 +5684,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--resume-from", type=str, default=None, help="Path to checkpoint file to resume from.")
     parser.add_argument("--scenario", choices=["leop_24h", "no_leop_24h", "leop_1yr"], default=None, help="Predefined scenario to run.")
     parser.add_argument("--coarse-step-sec", type=float, default=20.0, help="Coarse step for multi-rate stepping (leop_1yr).")
+    parser.add_argument("--no-plots", action="store_true", help="Disable plot generation.")
     return parser.parse_args()
 
 
@@ -5704,6 +5706,7 @@ if __name__ == "__main__":
             rng_seed=args.rng_seed,
             enable_periphery_bin_merge=not args.no_periphery_merge,
             coarse_step_sec=args.coarse_step_sec,
+            no_plots=args.no_plots,
         )
 
     if args.resume_from:

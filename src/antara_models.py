@@ -209,6 +209,12 @@ class MissionConfig:
     integrator_position_tolerance_m: float = 10.0
     integrator_velocity_tolerance_mps: float = 0.01
 
+    # Multi-rate stepping (leop_1yr)
+    coarse_step_sec: float = 20.0
+
+    # Plotting control
+    no_plots: bool = False
+
     # Plotting and telemetry colors
     mode_colors: Dict[str, str] = field(
         default_factory=lambda: {
