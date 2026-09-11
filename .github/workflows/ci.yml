@@ -48,6 +48,7 @@ jobs:
           create-args: >-
             python=${{ env.PYTHON_VERSION }}
             orekit
+            ppigrf=2.1.0
             numpy
             pandas
             matplotlib
@@ -69,6 +70,11 @@ jobs:
           print("Orekit import OK")
           print("Orekit module:", orekit.__file__)
           PY
+
+      - name: Install and verify physics dependencies
+        run: |
+          python -m pip install spacepy==0.7.0
+          python scripts/verify_physics_dependencies.py --require-ci-env
 
       - name: Set up Orekit data
         run: |
@@ -149,6 +155,7 @@ jobs:
           create-args: >-
             python=${{ env.PYTHON_VERSION }}
             orekit
+            ppigrf=2.1.0
             numpy
             pandas
             matplotlib
@@ -159,6 +166,11 @@ jobs:
             pytest
             pip
             -c conda-forge
+
+      - name: Install and verify physics dependencies
+        run: |
+          python -m pip install spacepy==0.7.0
+          python scripts/verify_physics_dependencies.py --require-ci-env
 
       - name: Set up Orekit data
         run: |
@@ -175,6 +187,9 @@ jobs:
       - name: Run FSM spec drift guard test
         run: |
           python -m pytest tests/test_fsm_spec_matches_code.py -v --tb=short
+
+      - name: Physics and attitude regression tests
+        run: python -m pytest tests/test_physics_attitude.py -v --tb=short
 
       - name: Syntax check validation tests
         run: |
@@ -222,6 +237,7 @@ jobs:
           create-args: >-
             python=${{ env.PYTHON_VERSION }}
             orekit
+            ppigrf=2.1.0
             numpy
             pandas
             matplotlib
@@ -232,6 +248,11 @@ jobs:
             pytest
             pip
             -c conda-forge
+
+      - name: Install and verify physics dependencies
+        run: |
+          python -m pip install spacepy==0.7.0
+          python scripts/verify_physics_dependencies.py --require-ci-env
 
       - name: Set up Orekit data
         run: |
@@ -273,6 +294,10 @@ jobs:
 
           assert len(df) > 0, "No telemetry data"
           assert "mode" in df.columns, "Telemetry is missing required 'mode' column"
+
+          elapsed = df["time_sec"] - df["time_sec"].iloc[0]
+          assert 3598 <= elapsed.iloc[-1] <= 3600, elapsed.iloc[-1]
+          assert (elapsed.diff().dropna() == 2.0).all(), "Unexpected telemetry step"
 
           print(f"Modes: {df['mode'].unique()}")
           PY
@@ -357,6 +382,7 @@ jobs:
           create-args: >-
             python=${{ env.PYTHON_VERSION }}
             orekit
+            ppigrf=2.1.0
             numpy
             pandas
             matplotlib
@@ -376,6 +402,11 @@ jobs:
           import orekit
           print("Orekit import OK")
           PY
+
+      - name: Install and verify physics dependencies
+        run: |
+          python -m pip install spacepy==0.7.0
+          python scripts/verify_physics_dependencies.py --require-ci-env
 
       - name: Set up Orekit data
         run: |
@@ -476,6 +507,7 @@ jobs:
           create-args: >-
             python=${{ env.PYTHON_VERSION }}
             orekit
+            ppigrf=2.1.0
             numpy
             pandas
             matplotlib
@@ -486,6 +518,11 @@ jobs:
             pytest
             pip
             -c conda-forge
+
+      - name: Install and verify physics dependencies
+        run: |
+          python -m pip install spacepy==0.7.0
+          python scripts/verify_physics_dependencies.py --require-ci-env
 
       - name: Set up Orekit data
         run: |

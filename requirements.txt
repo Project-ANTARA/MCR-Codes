@@ -29,6 +29,10 @@ graphviz>=0.20.0
 # Testing framework
 pytest>=7.0.0
 
+# Science physics backends (install into the same environment as Orekit)
+ppigrf==2.1.0
+spacepy==0.7.0
+
 # ============================================================
 # Orekit Python Wrapper (NOT on PyPI - must build from source)
 # ============================================================

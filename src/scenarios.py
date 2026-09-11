@@ -1,5 +1,5 @@
 from typing import Literal, Tuple
-from ANTARA_Science_Sim import MissionConfig
+from antara_models import MissionConfig
 
 
 def build_scenario(name: Literal["leop_24h", "no_leop_24h", "leop_1yr"]) -> Tuple[MissionConfig, bool]:

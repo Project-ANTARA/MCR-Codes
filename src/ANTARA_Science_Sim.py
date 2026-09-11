@@ -59,7 +59,7 @@ try:
     _PYIGRF_AVAILABLE = True
 except ImportError:
     _PYIGRF_AVAILABLE = False
-    print("[WARN] pyIGRF not found. Falling back to dipole B-field for IGRF queries.")
+    print("[WARN] ppigrf not found. Falling back to dipole B-field for IGRF queries.")
 
 try:
     import spacepy.irbempy as irbem
@@ -456,13 +456,13 @@ class GroundStationModel:
 
 class IGRFModel:
     """
-    Thin wrapper around pyIGRF for IGRF-13 magnetic field evaluation.
+    Thin wrapper around ppigrf (IGRF-14 coefficients in ppigrf 2.1).
 
     Returns the full field vector [Bx, By, Bz] in NED (North-East-Down)
     geographic frame at the queried geodetic position and epoch, then
     converts to an inertial-frame vector for pitch-angle computation.
 
-    Falls back to a centred dipole if pyIGRF is unavailable.
+    Falls back to a centred dipole if ppigrf is unavailable.
 
     All inputs in SI / degree units; B-field output in Tesla.
     """
@@ -482,7 +482,7 @@ class IGRFModel:
         alt_km: float,
     ) -> np.ndarray:
         """
-        Query IGRF-13 at (lat, lon, alt) and return [Bn, Be, Bd] in Tesla.
+        Query IGRF at (lat, lon, alt) and return [Bn, Be, Bd] in Tesla.
 
         Parameters
         ----------
@@ -497,10 +497,9 @@ class IGRFModel:
         if not self._available:
             return self._dipole_ned_tesla(lat_deg, lon_deg, alt_km)
 
-        # pyIGRF.igrf_value returns (D, I, H, X, Y, Z, F) in nT/degrees
-        # X=north, Y=east, Z=down (positive down into Earth)
+        # ppigrf expects geodetic altitude in km and returns East/North/Up in nT.
         date = datetime(int(self.epoch_year), 3, 1)   # approximate from decimal year
-        Be, Bn, Bu = ppigrf.igrf(lon_deg, lat_deg, alt_km * 1000, date)  # returns nT
+        Be, Bn, Bu = ppigrf.igrf(lon_deg, lat_deg, alt_km, date)
         b_north_t =  float(np.asarray(Bn).item()) * 1e-9   # north
         b_east_t  =  float(np.asarray(Be).item()) * 1e-9   # east
         b_down_t  = -float(np.asarray(Bu).item()) * 1e-9   # ppigrf returns Up (+ve), IGRF Down (+ve down)
@@ -608,6 +607,7 @@ class ProtonEnvironmentModel:
         self.ap9_baseline = np.array(config.ap9_baseline_flux, dtype=float)
         self.n_channels = len(self.energy_channels)
         self._spacepy_available = _SPACEPY_AVAILABLE
+        self._ap9_query_warned = False
         # Detector aperture geometric factor (cm^2 sr), shared with PayloadModel.
         # theta_max_deg is a fixed detector-aperture half-angle (atan(1/3)), not a
         # config-tunable value, so it is computed once here rather than read from
@@ -762,8 +762,13 @@ class ProtonEnvironmentModel:
                 flux_diff_per_sr = max(0.0, float(flux_omni)) / (4.0 * math.pi * de_mev)
                 results.append(flux_diff_per_sr)
             return np.array(results, dtype=float)
-        except Exception:
-            # spacepy query failed; fall back to config baseline silently
+        except Exception as exc:
+            # SpacePy's AE8/AP8 interface does not implement AP9. Keep the
+            # existing baseline fallback, but never present it as live AP9.
+            if not self._ap9_query_warned:
+                print(f"[WARN] AP9 query unavailable ({type(exc).__name__}: {exc}). "
+                      "SpacePy get_AEP8 supports AE8/AP8, not AP9; using configured flux baseline.")
+                self._ap9_query_warned = True
             return self.ap9_baseline.copy()
 
     def compute_flux(
@@ -1670,7 +1675,7 @@ class SpacecraftFSM:
                 battery_wh >= self.config.critical_recovery_target_wh
                 and battery_wh >= safe_exit_threshold
                 and not adcs_saturation_hold_active
-                and pointing_error_deg <= self.config.safe_hold_deadband_deg
+                and pointing_budget_error_deg <= self.config.safe_hold_deadband_deg
             )
             if self._debounce("safe_exit_hold", hold_stable, self.config.recovery_debounce_samples):
                 self.post_safe_recovery_hold_active = False
@@ -2292,6 +2297,9 @@ class ANTARAScienceSimulator:
     def _run_geometric_self_tests(self) -> None:
         """Abort startup if the quaternion/DCM convention is internally inconsistent."""
 
+        # The 1e-6 degree bounds below test numerical frame construction, not
+        # flight pointing accuracy. atan2 residuals are about 1e-14 degrees.
+
         saved_current_quaternion = self.adcs.current_quaternion.copy()
         saved_target_quaternion = self.adcs.target_quaternion.copy()
         saved_current_tuple = self.adcs.current_quaternion_tuple
@@ -2661,14 +2669,16 @@ class ANTARAScienceSimulator:
         return _as_flat_vector(vector - (float(np.dot(vector, reference_axis)) * reference_axis))
 
     def _vector_angle_deg(self, first_vector: np.ndarray, second_vector: np.ndarray) -> float:
-        """Return the angle between two NumPy vectors in degrees."""
+        """Return the angle between two NumPy vectors in degrees.
 
-        cosine_term = np.clip(
-            float(np.dot(self._unit_numpy(first_vector), self._unit_numpy(second_vector))),
-            -1.0,
-            1.0,
-        )
-        return math.degrees(math.acos(cosine_term))
+        Uses atan2 with cross product for numerical stability at small angles.
+        """
+
+        a = self._unit_numpy(first_vector)
+        b = self._unit_numpy(second_vector)
+        dot = np.clip(np.dot(a, b), -1.0, 1.0)
+        cross_norm = np.linalg.norm(np.cross(a, b))
+        return math.degrees(math.atan2(cross_norm, dot))
 
     def _maybe_warn(self, warning_key: str, message: str) -> None:
         """Print a warning only once per warning key to avoid flooding the console."""
@@ -4763,8 +4773,8 @@ class ANTARAScienceSimulator:
         print(f"Mean EW asymmetry factor          : {mean_ew:.4f}")
         print(f"Peak lowest-energy bin flux      : {peak_low_energy_bin:.3e} p/cm²/s/sr/MeV")
         print(f"Peak highest-energy bin flux     : {peak_high_energy_bin:.3e} p/cm²/s/sr/MeV")
-        print(f"Spacepy AP9 available             : {_SPACEPY_AVAILABLE}")
-        print(f"pyIGRF available                  : {_PYIGRF_AVAILABLE}")
+        print(f"SpacePy/IRBEM import available    : {_SPACEPY_AVAILABLE} (does not imply AP9 support)")
+        print(f"ppigrf available                  : {_PYIGRF_AVAILABLE}")
         print(f"Science data generated            : {total_science_mb:.6f} MB")
         print(f"Science data downlinked           : {total_downlinked_mb:.6f} MB")
 
@@ -5672,42 +5682,51 @@ class ANTARAScienceSimulator:
 
         self.logger.flush_telemetry()
 
-def _parse_args() -> argparse.Namespace:
+def _parse_args(argv=None) -> argparse.Namespace:
     """Parse the lightweight CLI for DITL run controls."""
 
     parser = argparse.ArgumentParser(description="Run the ANTARA Science DITL simulator.")
-    parser.add_argument("--duration-hours", type=float, default=24.0, help="Simulation duration in hours.")
-    parser.add_argument("--step-sec", type=float, default=2.0, help="Simulation step size in seconds.")
-    parser.add_argument("--rng-seed", type=int, default=42, help="Seed for the simulator RNG.")
+    parser.add_argument("--duration-hours", type=float, default=None, help="Override scenario duration in hours (default: 24 without a scenario).")
+    parser.add_argument("--step-sec", type=float, default=None, help="Override step in seconds; fixed stepping unless --coarse-step-sec is also supplied (default fine step: 2).")
+    parser.add_argument("--rng-seed", type=int, default=None, help="Seed for the simulator RNG.")
     parser.add_argument("--no-periphery-merge", action="store_true", help="Disable adaptive periphery bin merging.")
     parser.add_argument("--checkpoint-every-hours", type=float, default=None, help="Save checkpoint every N hours.")
     parser.add_argument("--resume-from", type=str, default=None, help="Path to checkpoint file to resume from.")
     parser.add_argument("--scenario", choices=["leop_24h", "no_leop_24h", "leop_1yr"], default=None, help="Predefined scenario to run.")
-    parser.add_argument("--coarse-step-sec", type=float, default=20.0, help="Coarse step for multi-rate stepping (leop_1yr).")
+    parser.add_argument("--coarse-step-sec", type=float, default=None, help="Coarse step for multi-rate stepping (leop_1yr).")
     parser.add_argument("--no-plots", action="store_true", help="Disable plot generation.")
-    return parser.parse_args()
+    return parser.parse_args(argv)
 
 
-if __name__ == "__main__":
-    args = _parse_args()
-
-    # Handle scenario shortcuts using build_scenario
+def _config_from_args(args):
+    """Apply global defaults, then a scenario preset, then explicit CLI values."""
     skip_leop = False
     if args.scenario:
         from scenarios import build_scenario
         config, skip_leop = build_scenario(args.scenario)
-        # Warn if both scenario and explicit duration/step given
-        if args.duration_hours != 24.0 or args.step_sec != 2.0:
-            print(f"[WARN] --scenario overrides --duration-hours and --step-sec")
     else:
-        config = MissionConfig(
-            sim_duration_hours=args.duration_hours,
-            step_sec=args.step_sec,
-            rng_seed=args.rng_seed,
-            enable_periphery_bin_merge=not args.no_periphery_merge,
-            coarse_step_sec=args.coarse_step_sec,
-            no_plots=args.no_plots,
-        )
+        config = MissionConfig()
+    from dataclasses import replace
+    overrides = {
+        name: value for name, value in {
+            "sim_duration_hours": args.duration_hours,
+            "step_sec": args.step_sec,
+            "rng_seed": args.rng_seed,
+            "coarse_step_sec": args.coarse_step_sec,
+        }.items() if value is not None
+    }
+    if args.step_sec is not None and args.coarse_step_sec is None:
+        overrides["coarse_step_sec"] = args.step_sec
+    if args.no_plots:
+        overrides["no_plots"] = True
+    if args.no_periphery_merge:
+        overrides["enable_periphery_bin_merge"] = False
+    return replace(config, **overrides), skip_leop
+
+
+if __name__ == "__main__":
+    args = _parse_args()
+    config, skip_leop = _config_from_args(args)
 
     if args.resume_from:
         print(f"[Resume] Loading checkpoint from {args.resume_from}")
