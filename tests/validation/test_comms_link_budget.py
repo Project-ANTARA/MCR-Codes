@@ -19,6 +19,7 @@ Tolerance:
 from __future__ import annotations
 
 import sys
+import os
 from pathlib import Path
 
 # Add src to path
@@ -217,7 +218,7 @@ def main():
             return bool(obj)
         return obj
 
-    with open(Path(__file__).parent / "validation_results_comms.json", "w") as f:
+    with open(Path(os.environ.get("ANTARA_VALIDATION_OUTPUT_DIR", Path(__file__).parent)) / "validation_results_comms.json", "w") as f:
         json.dump({
             "overall_pass": all_pass,
             "results": convert(results),

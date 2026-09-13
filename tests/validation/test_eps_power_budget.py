@@ -11,6 +11,7 @@ Tolerance: ±2%
 from __future__ import annotations
 
 import sys
+import os
 from pathlib import Path
 
 # Add src to path
@@ -94,10 +95,11 @@ def main():
         "config_value": config_val,
         "error_pct": error_pct,
         "passed": passed,
+        "overall_pass": bool(passed),
         "note": "solar_panel_efficiency = BOL_cell * packing_factor. Harness and thermal applied in compute_solar_power()"
     }
 
-    with open(Path(__file__).parent / "validation_results_eps.json", "w") as f:
+    with open(Path(os.environ.get("ANTARA_VALIDATION_OUTPUT_DIR", Path(__file__).parent)) / "validation_results_eps.json", "w") as f:
         json.dump(results, f, indent=2)
 
     print("\n" + "=" * 70)

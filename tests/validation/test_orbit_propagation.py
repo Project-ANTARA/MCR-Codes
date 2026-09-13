@@ -3,7 +3,7 @@
 Orbit propagation validation test.
 
 Compares Orekit numerical propagation against:
-1. Skyfield (if available) - for period and RAAN drift
+1. Two-body Kepler period (a separate unperturbed numerical propagation)
 2. Closed-form SSO precession formula: dOmega/dt ≈ -1.5 * n * J2 * (Re/p)^2 * cos(i)
 
 Tolerances:
@@ -14,20 +14,13 @@ Tolerances:
 from __future__ import annotations
 
 import sys
+import os
 from pathlib import Path
 
 # Add src to path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / "src"))
 
 import numpy as np
-
-# Try to import Skyfield - optional
-try:
-    from skyfield.api import EarthSatellite, load, wgs84
-    SKYFIELD_AVAILABLE = True
-except ImportError:
-    SKYFIELD_AVAILABLE = False
-    print("[WARN] Skyfield not available. Only closed-form comparison will run.")
 
 # Orekit imports
 import orekit
@@ -38,6 +31,9 @@ from org.orekit.frames import FramesFactory
 from org.orekit.orbits import KeplerianOrbit, PositionAngleType
 from org.orekit.utils import Constants, IERSConventions
 from org.orekit.propagation.numerical import NumericalPropagator
+from org.orekit.propagation import SpacecraftState
+from org.orekit.forces.gravity import ThirdBodyAttraction
+from paths import init_orekit_data
 from org.orekit.orbits import OrbitType
 from org.hipparchus.ode.nonstiff import DormandPrince853Integrator
 from org.orekit.forces.gravity import HolmesFeatherstoneAttractionModel
@@ -64,7 +60,7 @@ SRP_COEFF = 1.8
 # Earth constants
 MU = Constants.WGS84_EARTH_MU
 RE = Constants.WGS84_EARTH_EQUATORIAL_RADIUS
-J2 = Constants.WGS84_EARTH_C20
+J2 = -Constants.WGS84_EARTH_C20
 SOLAR_CONSTANT = 1361.0
 
 # Simulation duration
@@ -74,6 +70,7 @@ STEP_SEC = 60.0
 
 def build_orekit_propagator():
     """Build Orekit numerical propagator matching ANTARA config."""
+    init_orekit_data()
     utc = TimeScalesFactory.getUTC()
     start_date = AbsoluteDate(2000, 3, 1, 0, 0, 0.0, utc)
 
@@ -87,10 +84,10 @@ def build_orekit_propagator():
     orbit = KeplerianOrbit(
         semi_major_axis,
         ECCENTRICITY,
-        np.radians(INCLINATION_DEG),
-        np.radians(ARG_PERIGEE_DEG),
-        np.radians(RAAN_DEG),
-        np.radians(TRUE_ANOMALY_DEG),
+        float(np.radians(INCLINATION_DEG)),
+        float(np.radians(ARG_PERIGEE_DEG)),
+        float(np.radians(RAAN_DEG)),
+        float(np.radians(TRUE_ANOMALY_DEG)),
         PositionAngleType.TRUE,
         inertial_frame,
         start_date,
@@ -101,8 +98,9 @@ def build_orekit_propagator():
     integrator = DormandPrince853Integrator(0.1, 600.0, 1e-3, 1e-6)
 
     propagator = NumericalPropagator(integrator)
-    propagator.setOrbitType(OrbitType.KEPLERIAN)
-    propagator.setInitialState(org.orekit.propagation.SpacecraftState(orbit, MASS_KG))
+    # Cartesian coordinates avoid the near-circular eccentricity singularity.
+    propagator.setOrbitType(OrbitType.CARTESIAN)
+    propagator.setInitialState(SpacecraftState(orbit, MASS_KG))
 
     # Gravity
     gravity_provider = GravityFieldFactory.getNormalizedProvider(10, 10)
@@ -110,9 +108,9 @@ def build_orekit_propagator():
     propagator.addForceModel(gravity)
 
     # Third body
-    propagator.addForceModel(org.orekit.forces.gravity.ThirdBodyAttraction(sun))
+    propagator.addForceModel(ThirdBodyAttraction(sun))
     moon = CelestialBodyFactory.getMoon()
-    propagator.addForceModel(org.orekit.forces.gravity.ThirdBodyAttraction(moon))
+    propagator.addForceModel(ThirdBodyAttraction(moon))
 
     # Atmosphere
     space_weather = CssiSpaceWeatherData(CssiSpaceWeatherData.DEFAULT_SUPPORTED_NAMES)
@@ -162,7 +160,7 @@ def run_orekit_propagation():
         state = propagator.propagate(absolute_date)
 
         osculating_orbit = state.getOrbit()
-        keplerian = osculating_orbit.toKeplerian()
+        keplerian = KeplerianOrbit(osculating_orbit)
 
         raan = np.degrees(keplerian.getRightAscensionOfAscendingNode())
         period_min = keplerian.getKeplerianPeriod() / 60.0
@@ -176,24 +174,28 @@ def run_orekit_propagation():
     return np.array(time_history), np.array(raan_history), np.array(period_history)
 
 
-def run_skyfield_propagation():
-    """Run Skyfield propagation for comparison."""
-    if not SKYFIELD_AVAILABLE:
-        return None, None, None
+def measure_two_body_period():
+    """Measure the next ascending crossing of the initial radial half-plane.
 
-    ts = load.timescale()
-    t0 = ts.utc(2000, 3, 1, 0, 0, 0)
+    The one-second Kepler tolerance applies to two-body dynamics, not the
+    osculating period of the independently checked full-force orbit.
+    """
+    from scipy.optimize import brentq
 
-    # Create TLE-like initial state from orbital elements
-    # Use EarthSatellite with initial position/velocity
-    from skyfield.api import Topos
-    from skyfield.sgp4lib import EarthSatellite
+    full, start, *_ = build_orekit_propagator()
+    initial = full.getInitialState()
+    prop = NumericalPropagator(DormandPrince853Integrator(0.01, 60.0, 1e-5, 1e-10))
+    prop.setOrbitType(OrbitType.CARTESIAN)
+    prop.setInitialState(initial)  # Central Newtonian attraction only.
+    pv = initial.getPVCoordinates()
+    transverse = pv.getMomentum().crossProduct(pv.getPosition())
+    expected = initial.getOrbit().getKeplerianPeriod()
 
-    # We'll use Orekit to get initial PV, then feed to Skyfield
-    # For simplicity, we'll just use SGP4 approximation
-    # Actually, let's just compute from TLE
-    # Since we don't have a real TLE, we'll skip this and use analytical
-    return None, None, None
+    def crossing(seconds):
+        position = prop.propagate(start.shiftedBy(float(seconds))).getPVCoordinates().getPosition()
+        return position.dotProduct(transverse)
+
+    return brentq(crossing, expected - 30.0, expected + 30.0, xtol=1e-6)
 
 
 def main():
@@ -233,19 +235,16 @@ def main():
     # Theoretical period at 600km: ~96.7 min = 5802 s
     theoretical_period_sec = 2 * np.pi * np.sqrt((RE + ALTITUDE_M)**3 / MU)
     theoretical_period_min = theoretical_period_sec / 60.0
-    period_error = abs(avg_period - theoretical_period_min) * 60.0  # seconds
+    measured_period_sec = measure_two_body_period()
+    period_error = abs(measured_period_sec - theoretical_period_sec)
+    print(f"   Two-body crossing period: {measured_period_sec:.6f} s")
     print(f"   Period error vs theoretical: {period_error:.2f} s (tol: ±1 s)")
-    period_pass = period_error <= 1.0
+    period_pass = bool(period_error <= 1.0)
 
     # Precession tolerance: ±5%
     precession_error_pct = abs(dOmega_orekit - dOmega_closed) / abs(dOmega_closed) * 100
     print(f"   Precession error: {precession_error_pct:.2f}% (tol: ±5%)")
-    precession_pass = precession_error_pct <= 5.0
-
-    # Skyfield comparison (if available)
-    if SKYFIELD_AVAILABLE:
-        print("\n4. Skyfield Comparison (skipped - need TLE)")
-        print("   Skipping Skyfield SGP4 comparison (requires TLE generation)")
+    precession_pass = bool(precession_error_pct <= 5.0)
 
     # Summary
     print("\n" + "=" * 70)
@@ -260,6 +259,7 @@ def main():
     # Write results
     results = {
         "period_avg_min": float(avg_period),
+        "two_body_period_sec": float(measured_period_sec),
         "period_error_sec": float(period_error),
         "period_pass": period_pass,
         "raan_precession_deg_day_closed": float(dOmega_closed),
@@ -270,7 +270,7 @@ def main():
     }
 
     import json
-    with open(Path(__file__).parent / "validation_results_orbit.json", "w") as f:
+    with open(Path(os.environ.get("ANTARA_VALIDATION_OUTPUT_DIR", Path(__file__).parent)) / "validation_results_orbit.json", "w") as f:
         json.dump(results, f, indent=2)
 
     return overall

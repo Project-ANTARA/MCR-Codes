@@ -2,8 +2,8 @@
 """
 IGRF Magnetic Field validation test.
 
-Compares IGRFModel.get_ned_field_tesla() against NOAA/NCEI IGRF-13 calculator
-output for the same points spanning the SAA.
+Compares IGRFModel.get_ned_field_tesla() against independent IRBEM IGRF
+evaluation. No external magnetospheric field is included.
 
 Tolerance: field magnitude within 5%
 """
@@ -11,21 +11,24 @@ Tolerance: field magnitude within 5%
 from __future__ import annotations
 
 import sys
+import os
 from pathlib import Path
 
 # Add src to path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / "src"))
 
 import json
+from datetime import datetime
 import numpy as np
+from spacepy import coordinates, irbempy, time
 
 # IGRF model from ANTARA_Science_Sim
 from ANTARA_Science_Sim import IGRFModel, MissionConfig
 
 
-# NOAA IGRF-13 reference values for test points (lat, lon, alt_km, year, B_north, B_east, B_down in nT)
-# Source: NOAA/NCEI IGRF-13 online calculator (https://www.ngdc.noaa.gov/geomag/igrf.shtml)
-# Accessed: 2024. Values are total field magnitude in nT at each location/epoch.
+# Retain the original locations and old magnitudes for audit only. The old
+# rounded magnitudes had no reproducible calculator output and disagreed with
+# both implementations. They are NOT used as acceptance references anymore.
 IGRF_REFERENCE_POINTS = [
     # (lat, lon, alt_km, year, B_mag_nT, description)
     # SAA core region
@@ -55,21 +58,42 @@ IGRF_REFERENCE_POINTS = [
 ]
 
 
+def reference_field_ned(lat, lon, alt, year):
+    """IRBEM GEO nT -> geodetic NED nT, independent of ppigrf.
+
+    SpacePy 0.7 bundles IGRF-13, valid through 2025.0. Its endpoint is used
+    explicitly for 2025 comparisons; this is not an IGRF-14 epoch validation.
+    ANTARA currently maps decimal epochs to March 1 of their integer year.
+    """
+    date = datetime(int(year), 3, 1) if year < 2025 else datetime(2025, 1, 1)
+    ticks = time.Ticktock([date], "UTC")
+    loci = coordinates.Coords([[alt, lat, lon]], "GDZ", "sph", use_irbem=True)
+    result = irbempy.get_Bfield(ticks, loci, extMag="0", options=[0, 1, 0, 0, 0])
+    x, y, z = np.asarray(result["Bvec"])[0]
+    phi, lam = np.radians([lat, lon])
+    north = -np.sin(phi) * (x*np.cos(lam) + y*np.sin(lam)) + z*np.cos(phi)
+    east = -x*np.sin(lam) + y*np.cos(lam)
+    down = -np.cos(phi) * (x*np.cos(lam) + y*np.sin(lam)) - z*np.sin(phi)
+    return np.array([north, east, down])
+
+
 def main():
     print("=" * 70)
     print("IGRF MAGNETIC FIELD VALIDATION TEST")
     print("=" * 70)
-    print(f"Reference: NOAA/NCEI IGRF-13 online calculator")
+    print("Reference: independent IRBEM IGRF-13, no external field")
     print(f"Test points: {len(IGRF_REFERENCE_POINTS)} locations spanning SAA and globe")
-    print(f"Epoch: 2000.25 (matching sim start 2000-03-01)")
+    print("Epochs: ANTARA March 1 mapping; IRBEM 2025 endpoint uses January 1")
 
     config = MissionConfig()
     igrf = IGRFModel(config.igrf_epoch_year)
+    if not igrf._available:
+        raise RuntimeError("ppigrf is required; dipole fallback is not IGRF validation")
 
     results = []
     all_pass = True
 
-    for i, (lat, lon, alt, year, ref_mag_nT, desc) in enumerate(IGRF_REFERENCE_POINTS):
+    for i, (lat, lon, alt, year, legacy_mag_nT, desc) in enumerate(IGRF_REFERENCE_POINTS):
         # Get field from IGRF model
         if year != 2000.25:
             # Need to create IGRF with different epoch
@@ -80,9 +104,12 @@ def main():
 
         b_mag_t = float(np.linalg.norm(b_ned))
         b_mag_nT = b_mag_t * 1e9
+        reference_ned = reference_field_ned(lat, lon, alt, year)
+        ref_mag_nT = float(np.linalg.norm(reference_ned))
 
         error_pct = abs(b_mag_nT - ref_mag_nT) / ref_mag_nT * 100
-        passed = error_pct <= 5.0
+        vector_error_pct = float(np.linalg.norm(b_ned * 1e9 - reference_ned) / ref_mag_nT * 100)
+        passed = bool(np.isfinite(vector_error_pct) and error_pct <= 5.0 and vector_error_pct <= 5.0)
 
         status = "PASS" if passed else "FAIL"
         print(f"  {i+1:2d}. {desc:30s} | Ref: {ref_mag_nT:6.0f} nT | Model: {b_mag_nT:6.0f} nT | Error: {error_pct:5.2f}% | {status}")
@@ -95,6 +122,10 @@ def main():
             "alt_km": alt,
             "year": year,
             "ref_mag_nT": ref_mag_nT,
+            "legacy_unverified_mag_nT": legacy_mag_nT,
+            "reference_ned_nT": reference_ned.tolist(),
+            "model_ned_nT": (b_ned * 1e9).tolist(),
+            "vector_error_pct": vector_error_pct,
             "model_mag_nT": b_mag_nT,
             "error_pct": error_pct,
             "passed": passed,
@@ -111,7 +142,7 @@ def main():
     print(f"  Overall: {'PASS' if all_pass else 'FAIL'} (tolerance: 5%)")
 
     # Save results
-    with open(Path(__file__).parent / "validation_results_igrf.json", "w") as f:
+    with open(Path(os.environ.get("ANTARA_VALIDATION_OUTPUT_DIR", Path(__file__).parent)) / "validation_results_igrf.json", "w") as f:
         json.dump({
             "overall_pass": all_pass,
             "tolerance_pct": 5.0,

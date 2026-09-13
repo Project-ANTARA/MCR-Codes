@@ -24,9 +24,11 @@ SCENARIOS = ["leop_24h", "no_leop_24h", "leop_1yr"]
 RESULTS_BASE = results_dir("science")
 
 
-def load_scenario_data(scenario: str) -> dict:
+def load_scenario_data(scenario: str, results_base: Path = RESULTS_BASE) -> dict:
     """Load all CSVs for a given scenario."""
-    base = RESULTS_BASE / scenario
+    base = Path(results_base)
+    if not (base / f"{scenario}_ANTARA_Science_telemetry.csv").exists():
+        base = base / scenario  # Legacy nested output layout.
     data = {}
 
     # Telemetry
@@ -143,6 +145,10 @@ def main():
                         help="Base results directory (default: results/science)")
     parser.add_argument("--output-dir", type=Path, default=Path("."),
                         help="Output directory for comparison files")
+    parser.add_argument("--require-all", action="store_true",
+                        help="Fail if any expected scenario telemetry is missing")
+    parser.add_argument("--require-full-duration", action="store_true",
+                        help="Require complete 24h/24h/8760h preset telemetry")
     args = parser.parse_args()
 
     results_dir = Path(args.results_dir)
@@ -153,7 +159,7 @@ def main():
 
     for scenario in SCENARIOS:
         print(f"\n=== Loading {scenario} ===")
-        data = load_scenario_data(scenario)
+        data = load_scenario_data(scenario, results_dir)
 
         telemetry = data["telemetry"]
         mode_transitions = data["mode_transitions"]
@@ -161,6 +167,8 @@ def main():
         gs_contacts = data["gs_contacts"]
 
         if telemetry.empty:
+            if args.require_all or args.require_full_duration:
+                parser.error(f"Missing telemetry for {scenario} under {results_dir}")
             print(f"  WARNING: No telemetry data found for {scenario}")
             continue
 
@@ -168,7 +176,18 @@ def main():
         if "time_sec" in telemetry.columns:
             total_sim_hours = (telemetry["time_sec"].max() - telemetry["time_sec"].min()) / 3600.0
         else:
+            if args.require_full_duration:
+                parser.error(f"{scenario}: telemetry has no time_sec column")
             total_sim_hours = 24.0  # fallback
+
+        if args.require_full_duration:
+            expected = 8760.0 if scenario == "leop_1yr" else 24.0
+            times = telemetry["time_sec"].to_numpy(dtype=float)
+            if (not np.isfinite(times).all() or len(times) < 2
+                    or not (np.diff(times) > 0).all()
+                    or not np.isclose(times[0], 0.0, rtol=0, atol=1e-6)
+                    or not np.isclose(times[-1], expected * 3600, rtol=0, atol=1e-6)):
+                parser.error(f"{scenario}: expected complete {expected:g}h telemetry, got {total_sim_hours:g}h")
 
         print(f"  Simulation duration: {total_sim_hours:.2f} hours")
         print(f"  Telemetry rows: {len(telemetry)}")

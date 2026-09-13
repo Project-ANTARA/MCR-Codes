@@ -193,6 +193,8 @@ Explicit CLI arguments override scenario presets. An explicit `--step-sec` selec
 
 Older root validation and CI investigation reports retain their original captures and are marked historical; do not treat their old warnings as current package-installation guidance.
 
+The [2026-09-13 scheduled verification report](SCHEDULED_VERIFICATION_FIX_REPORT.md) records nightly/weekly concurrency repairs, validation reference corrections, local results, and remaining full-year runtime limits. New validation runs write under `results/validation/`, not the historical root report.
+
 ---
 
 For contributor conventions, see [AGENTS.md](../AGENTS.md). For specific subsystem behavior, consult its guide and current source.

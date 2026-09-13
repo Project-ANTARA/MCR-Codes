@@ -9,22 +9,26 @@ and writes VALIDATION_REPORT.md with one section per subsystem.
 from __future__ import annotations
 
 import json
+import argparse
+import os
 import subprocess
 import sys
 from pathlib import Path
 
 VALIDATION_DIR = Path(__file__).parent.parent / "tests" / "validation"
 TESTS = [
-    ("test_orbit_propagation.py", "Orbit Propagation", "Skyfield/SGP4 vs Orekit", "period ±1s, RAAN precession ±5%"),
-    ("test_igrf_field.py", "IGRF Magnetic Field", "NOAA IGRF-13 calculator", "field magnitude ±5%"),
+    ("test_orbit_propagation.py", "Orbit Propagation", "Two-body period + first-order J2 precession", "period ±1s, RAAN precession ±5%"),
+    ("test_igrf_field.py", "IGRF Magnetic Field", "Independent IRBEM IGRF-13 (2025 endpoint caveat)", "field magnitude and vector ±5%"),
     ("test_adcs_detumble_time.py", "ADCS Detumble Time", "B-dot τ ≈ I/(k·B²)", "order-of-magnitude"),
     ("test_eps_power_budget.py", "EPS Power Budget", "BOL cell × packing factor", "±2%"),
     ("test_saa_flux_model.py", "SAA/Flux Model", "AP9 quiet-time at L~1.5", "factor of 2 per channel"),
     ("test_comms_link_budget.py", "Comms Link Budget", "Friis link budget", "heuristic within 30% at 45°"),
 ]
+RESULT_NAMES = dict(zip((test[0] for test in TESTS),
+                       ("orbit", "igrf", "adcs", "eps", "flux", "comms")))
 
 
-def run_test(script_name: str) -> dict:
+def run_test(script_name: str, output_dir: Path = VALIDATION_DIR) -> dict:
     """Run a single validation test and return results."""
     script_path = VALIDATION_DIR / script_name
     if not script_path.exists():
@@ -41,6 +45,7 @@ def run_test(script_name: str) -> dict:
             text=True,
             timeout=300,
             cwd=VALIDATION_DIR.parent.parent,  # run from repo root for imports
+            env={**os.environ, "ANTARA_VALIDATION_OUTPUT_DIR": str(output_dir.resolve())},
         )
         return {
             "script": script_name,
@@ -49,11 +54,13 @@ def run_test(script_name: str) -> dict:
             "stdout": result.stdout,
             "stderr": result.stderr,
         }
-    except subprocess.TimeoutExpired:
+    except subprocess.TimeoutExpired as exc:
         return {
             "script": script_name,
             "status": "TIMEOUT",
             "error": "Test timed out after 300s",
+            "stdout": (exc.stdout or b"").decode(errors="replace") if isinstance(exc.stdout, bytes) else (exc.stdout or ""),
+            "stderr": (exc.stderr or b"").decode(errors="replace") if isinstance(exc.stderr, bytes) else (exc.stderr or ""),
         }
     except Exception as e:
         return {
@@ -63,9 +70,9 @@ def run_test(script_name: str) -> dict:
         }
 
 
-def load_json_result(test_name: str) -> dict:
+def load_json_result(test_name: str, output_dir: Path = VALIDATION_DIR) -> dict:
     """Load JSON result file if it exists."""
-    json_path = VALIDATION_DIR / f"validation_results_{test_name.replace('test_', '').replace('.py', '')}.json"
+    json_path = output_dir / f"validation_results_{RESULT_NAMES[test_name]}.json"
     if json_path.exists():
         with open(json_path) as f:
             return json.load(f)
@@ -73,8 +80,16 @@ def load_json_result(test_name: str) -> dict:
 
 
 def main():
-    output_dir = Path(".")
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--output-dir", type=Path, default=Path("results/validation"),
+                        help="Report, JSON and full logs (default: results/validation)")
+    args = parser.parse_args()
+    output_dir = args.output_dir.resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
+    for script, *_ in TESTS:
+        json_path = output_dir / f"validation_results_{RESULT_NAMES[script]}.json"
+        if json_path.exists():
+            parser.error(f"Output already exists: {json_path}; choose a fresh --output-dir")
 
     print("=" * 70)
     print("RUNNING ALL VALIDATION TESTS")
@@ -83,8 +98,20 @@ def main():
     results = []
     for script, title, reference, tolerance in TESTS:
         print(f"\nRunning {script}...")
-        result = run_test(script)
-        json_data = load_json_result(script.replace(".py", ""))
+        # Keep a failed rerun from presenting an earlier PASS JSON as fresh.
+        result = run_test(script, output_dir)
+        try:
+            json_data = load_json_result(script, output_dir)
+            if not isinstance(json_data, dict):
+                raise ValueError("Quantitative result must be a JSON object")
+            if result["status"] == "PASS" and not json_data.get("overall_pass", False):
+                result.update(status="FAIL", error="Missing or failing quantitative results")
+        except (ValueError, OSError) as exc:
+            json_data = {}
+            result.update(status="ERROR", error=str(exc))
+        (output_dir / f"{script}.log").write_text(
+            result.get("stdout", "") + result.get("stderr", "") + result.get("error", ""))
+        print(f"  {result['status']}", flush=True)
         result["json_data"] = json_data
         results.append((title, reference, tolerance, result))
 
@@ -143,7 +170,8 @@ def main():
             f"**Script:** `{result['script']}`",
             f"**Status:** {result['status']}",
             f"**Reference:** {reference}",
-            f"**Tolerance:** {result.get('tolerance', 'N/A')}",
+            f"**Tolerance:** {tolerance}",
+            f"**Error:** {result.get('error', 'none')}",
             "",
         ])
 
@@ -181,7 +209,9 @@ def main():
         "- AP9 flux models carry ~factor 2-3 intrinsic uncertainty (limited measurements).",
         "- B-dot detumble analytical model is order-of-magnitude due to simplified B-field.",
         "- Comms heuristic (sqrt(sin(el))) is a PDR-level approximation; full link budget needed for CDR.",
-        "- Period comparison uses theoretical circular orbit at 600km; real orbit has J2 perturbations.",
+        "- Period uses a two-body numerical crossing; full-force RAAN drift uses first-order J2 theory.",
+        "- IRBEM is an independent IGRF-13 implementation; the 2025 case uses its validity endpoint.",
+        "- No live AP9 or Skyfield/SGP4 comparison is executed by this suite.",
         "",
         "---",
         "",

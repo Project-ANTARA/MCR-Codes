@@ -30,8 +30,8 @@ The one-hour fixed-step checks produced 1,801 rows at two-second intervals. The 
 
 ## Comparison tool limitations
 
-`compare_scenarios.py` currently expects **nested** input paths like `results/science/leop_24h/leop_24h_ANTARA_Science_telemetry.csv`, unlike Science's flat output. It also looks for an unprefixed telemetry filename within that scenario directory. Its `--results-dir` argument is parsed into a local variable, but the loader still uses the module-level `RESULTS_BASE`; the override is not wired through. Merely supplying the flat output directory will not solve this mismatch.
+As of 2026-09-13, `compare_scenarios.py` reads Science's flat prefixed CSVs and honors `--results-dir`. Legacy nested directories and unprefixed nested telemetry remain supported.
 
-If using the tool, stage copies of results in the expected nested directories without removing original outputs. It writes `scenario_comparison.csv` and `scenario_comparison.png` to `--output-dir` and exits 1 when no valid telemetry is found. It uses sample counts for mode duty cycles, so multirate data can bias those percentages; derive duration-weighted metrics independently before making mission claims. This documentation update does not repair the comparison script.
+It writes `scenario_comparison.csv` and `scenario_comparison.png` to `--output-dir`. Use `--require-all` to reject missing scenarios; nightly additionally uses `--require-full-duration` to require complete, monotonic 24h/24h/8760h telemetry starting at zero. Without the latter flag, bounded studies can still be compared. Sample-count duty cycles remain biased for multirate telemetry; derive duration-weighted metrics independently before making mission claims.
 
 For current recovery evidence, see the [runtime report](SIMULATION_RUNTIME_FIX_REPORT.md).

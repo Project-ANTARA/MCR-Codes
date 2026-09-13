@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import sys
+import os
 from pathlib import Path
 
 import numpy as np
@@ -168,7 +169,7 @@ def main():
         "overall_pass": int(om_pass),
     }
 
-    with open(Path(__file__).parent / "validation_results_adcs.json", "w") as f:
+    with open(Path(os.environ.get("ANTARA_VALIDATION_OUTPUT_DIR", Path(__file__).parent)) / "validation_results_adcs.json", "w") as f:
         json.dump(results, f, indent=2)
 
     return om_pass
