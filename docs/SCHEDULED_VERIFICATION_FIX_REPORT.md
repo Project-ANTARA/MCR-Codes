@@ -60,12 +60,19 @@ Here `python` denotes the local Orekit interpreter; sandbox runs also set `SPACE
 
 **Subsequent user decision:** keep full-year nightly on the local machine.
 The workflow now targets `antara-nightly` with a 23-hour job budget and
-20-hour annual-process timeout. The service installer is prepared but requires
-the user's sudo prompt; registration and service startup have not occurred.
+20-hour annual-process timeout. The user completed installation on 2026-09-13;
+subsequent read-only checks confirmed GitHub status `online`, `busy=false`, and
+the hardened systemd service active/running with zero restarts. The listener
+connected at 08:33:35 UTC and began listening for jobs at 08:33:36 UTC.
+The initial installer token-prefix bug was fixed using
+`ACTIONS_RUNNER_INPUT_TOKEN`; explicit `--resume` safely reused the unregistered
+installation. Both installer regression tests passed. No workflow was dispatched
+during setup verification; service-account physics and full-year execution
+remain unverified.
 See [local runner installation/status](LOCAL_NIGHTLY_RUNNER.md). The following
 60-minute budget description records the initial investigation, not the updated workflow.
 
-The nightly full-year step still requests 8,760 simulated hours within 60 wall minutes, followed by 5,000 MC trials under a 180-minute job budget. Neither the full-year runtime nor that entire sequence was verified in this repair. The existing annual CSV is incomplete; it was only read, not modified. Prior 60-hour runtime evidence does not establish full-year success.
+Initially, the nightly full-year step requested 8,760 simulated hours within 60 wall minutes, followed by 5,000 MC trials under a 180-minute job budget. Those deadlines have been replaced by the local-runner budgets above. Neither the full-year runtime nor that entire sequence was verified in this repair. The annual CSV inspected during the investigation was incomplete; it was only read, not modified. Prior 60-hour runtime evidence does not establish full-year success.
 
 No scientific assertions were disabled and no tolerances were relaxed. No live AP9 or SGP4 cross-validation is claimed. The workflow's concurrency/dispatch design follows [GitHub's workflow syntax](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax).
 
@@ -76,4 +83,4 @@ gh workflow run ci.yml --ref main -f suite=weekly
 gh workflow run ci.yml --ref main -f suite=nightly
 ```
 
-Assessment: **local validation repairs verified; runner installation and full-year execution remain pending**. The user selected the longer-running local runner; no shortened nightly scenario was introduced.
+Assessment: **local validation repairs and runner connectivity verified; service-account physics setup and full-year execution remain unverified**. The user selected the longer-running local runner; no shortened nightly scenario was introduced.

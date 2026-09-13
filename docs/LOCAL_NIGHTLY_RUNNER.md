@@ -3,10 +3,24 @@
 ## Status and installation
 
 The workflow now targets a dedicated Linux x64 runner labeled `antara-nightly`.
-Installation is **pending the local sudo step**; no runner has been registered
-or service started by the assistant. The repository was confirmed private.
+Installation and connectivity were **verified on 2026-09-13** after the user
+completed the sudo installation. GitHub reported `antara-local-nightly` online
+and idle, with labels `self-hosted`, `Linux`, `X64`, and `antara-nightly`.
+The service logged `Connected to GitHub` at 14:03:35 IST and `Listening for Jobs`
+at 14:03:36 IST (08:33:36 UTC). The installer's initial `offline` response was
+a startup timing effect, not a registration failure. The repository was private
+at inspection. No workflow was dispatched during setup verification.
 
-From the repository root, run this as your normal GitHub-authenticated user:
+The systemd service was enabled and active/running with zero restarts, running
+as `antara-runner`. Verified protections: `ProtectHome=yes`,
+`ProtectSystem=strict`, and `NoNewPrivileges=yes`. These checks establish runner
+connectivity, **not** successful environment creation or full-year simulation.
+
+## Fresh installation and recovery
+
+The existing machine is already installed; do not rerun installation or resume
+on the healthy registered runner. For a new installation, run from the repository
+root as your normal GitHub-authenticated user:
 
 ```bash
 bash scripts/install_local_runner.sh
@@ -35,13 +49,15 @@ Enter your sudo password only in your terminal, never in chat. The installer:
   hides personal home directories and limits persistent writes to runner state.
 - Leaves runner auto-updates enabled and does not dispatch any workflow.
 
-The account has no sudo privileges. Runner files, checkouts and Micromamba's
-Python 3.11 `antara` environment live under its own home, separate from the
-developer's Conda `orekit_env`. Ordinary local development still uses Conda.
+The account has no sudo privileges. Runner files live under its own home;
+workflow checkouts and the planned Micromamba Python 3.11 `antara` environment
+use that separate account, away from the developer's Conda `orekit_env`.
+Ordinary local development still uses Conda.
 The service uses GitHub's `runsvc.sh` entrypoint. See [GitHub service guidance](https://docs.github.com/en/actions/how-tos/manage-runners/self-hosted-runners/configure-the-application).
 
-Arch Linux was detected locally. The runner's native/.NET dependencies and
-Micromamba installation still require verification on this host. The installer
+Arch Linux was detected locally. Runner 2.337.0 started successfully, confirming
+its startup dependencies. Workflow Micromamba installation and physics backend
+execution still require verification under the service account. The installer
 does not automatically upgrade system packages. On failure, retain the error
 and ask for diagnosis; existing accounts/directories are deliberately not
 overwritten on rerun. Downloads remain in the printed temporary directory.
@@ -81,13 +97,15 @@ for untrusted pull requests.
 ```bash
 gh api repos/Project-ANTARA/MCR-Codes/actions/runners \
   --jq '.runners[] | {name,status,labels:[.labels[].name]}'
-sudo systemctl status 'actions.runner.*'
-sudo journalctl -u 'actions.runner.*' -n 80 --no-pager
+systemctl status actions.runner.Project-ANTARA-MCR-Codes.antara-local-nightly.service
+sudo journalctl -u actions.runner.Project-ANTARA-MCR-Codes.antara-local-nightly.service -n 80 --no-pager
 ```
 
 After the workflow changes are published on the default branch, a maintainer
 can explicitly launch `gh workflow run ci.yml --ref main -f suite=nightly`.
-That launches the real full-year campaign; publication/dispatch was not performed.
+That launches the real full-year campaign; the assistant did not publish or
+dispatch it during setup verification. Check the default-branch workflow before
+dispatching; an online runner alone does not establish that routing is deployed.
 Use the exact service name printed by the installer with `sudo systemctl stop`
 or `sudo systemctl disable --now` to stop it. Preserve run outputs before
 reinstalling or removing the service/account.

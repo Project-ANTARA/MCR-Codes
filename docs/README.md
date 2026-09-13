@@ -195,6 +195,8 @@ Older root validation and CI investigation reports retain their original capture
 
 The [2026-09-13 scheduled verification report](SCHEDULED_VERIFICATION_FIX_REPORT.md) records nightly/weekly concurrency repairs, validation reference corrections, local results, and remaining full-year runtime limits. New validation runs write under `results/validation/`, not the historical root report.
 
+The [local nightly runner guide](LOCAL_NIGHTLY_RUNNER.md) records successful installation and online verification on 2026-09-13, exact service/log commands, and installer recovery. Runner connectivity is verified; its workflow physics environment and full-year campaign are not yet verified.
+
 ---
 
 For contributor conventions, see [AGENTS.md](../AGENTS.md). For specific subsystem behavior, consult its guide and current source.

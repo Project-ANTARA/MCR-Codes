@@ -244,8 +244,9 @@ gh workflow run ci.yml --ref main -f suite=nightly
 
 Manual triggers launch real Actions jobs. Nightly retains all 8,760 simulated
 hours and now targets the local `antara-nightly` runner, with a 20-hour annual
-process budget and a 23-hour job budget. Installation requires the local sudo
-step; full-year completion is **not verified**. See [local runner setup](docs/LOCAL_NIGHTLY_RUNNER.md).
+process budget and a 23-hour job budget. The local service was installed and
+verified online on 2026-09-13. Service-account physics setup and full-year
+completion remain **unverified**. See [local runner status and operation](docs/LOCAL_NIGHTLY_RUNNER.md).
 See [scheduled verification repairs and limits](docs/SCHEDULED_VERIFICATION_FIX_REPORT.md).
 
 All five Orekit jobs use Micromamba environment `antara`, conda-forge `ppigrf=2.1.0`, and activated `python -m pip install spacepy==0.7.0`. Backend verification checks `/micromamba/envs/antara/` in the interpreter path and executes real IGRF/IRBEM queries. These workflow changes were checked locally; the repair report does not claim a hosted CI run.
