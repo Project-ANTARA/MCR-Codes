@@ -1,5 +1,11 @@
 # ANTARA_pointing_budget.py
 
+## Current scope (2026-09-12)
+
+Source: [ANTARA_pointing_budget.py](../src/ANTARA_pointing_budget.py). The code explicitly uses `Vector3D.PLUS_K` (+Z) as the antenna and Orekit `NadirPointing`. This is a standalone convention, not Science's +Y relay convention. Do not interpret its plot as validation of Science's moving-LOS acquisition or saturation recovery. See the [Science attitude guide](ANTARA_Science_Sim.md#attitude-geometry) for that model.
+
+Setup and navigation: [repository README](../README.md) · [documentation index](README.md). Supporting study results were not rerun as part of this documentation review.
+
 ## File Overview
 Ground station contact pointing budget analysis for ANTARA. Propagates 1-day Keplerian orbit (analytical, no perturbations) with nadir-pointing attitude, computes off-boresight angle between +Z body axis (antenna boresight) and ground station LOS vector during passes above 10° elevation mask. Outputs pass statistics and off-boresight angle plot.
 
@@ -51,11 +57,9 @@ python src/ANTARA_pointing_budget.py
 ## Notes / TODOs
 - **Analytical propagator**: `KeplerianPropagator` — no J2, drag, SRP → orbit doesn't evolve, RAAN/argument of perigee fixed
 - **Fixed RAAN=0°**: Single RAAN case — no sweep
-- **Nadir-pointing**: +Z = orbit normal (not Earth-pointing) — boresight is +Z, so antenna points along orbit normal
-  - This means off-boresight angle = angle between orbit normal and GS LOS
-  - For nadir-pointing, +Y = nadir, +Z = orbit normal
+- **Attitude provider**: Uses Orekit `NadirPointing` and transforms the LOS with its attitude rotation; do not substitute Science's custom LVLH axis mapping
 - **Single GS**: Goa only (15°N, 74°E)
 - **No link budget**: Only pointing angle — no SNR, data rate, margin analysis
-- **Body frame**: Assumes +Z = antenna boresight (consistent with ICD: +Z = fixed solar panel, but here used as antenna)
+- **Body frame**: +Z antenna is specific to this study and differs from Science's +Y relay antenna
 - **Short duration**: 1 day only — no seasonal/annual variation
 - **Plot only during contact**: `times`/`angles` only appended when elevation > mask

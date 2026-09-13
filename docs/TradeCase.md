@@ -1,5 +1,11 @@
 # TradeCase.py
 
+## Current scope (2026-09-12)
+
+Source: [TradeCase.py](../src/TradeCase.py). This script performs analytical calculations but still calls `init_orekit_data()` at module scope. Use the [repository environment and data setup](../README.md#quick-start); importing it can write figures/CSVs. Its hardcoded eclipse and cycle-life tables are assumptions, not refreshed vendor evidence or outputs from the latest Science recovery run.
+
+Setup and navigation: [repository README](../README.md) · [documentation index](README.md). Supporting study results were not rerun as part of this documentation review.
+
 ## File Overview
 Analytical battery trade study for ANTARA mission. Computes Depth of Discharge (DoD) vs. RAAN for multiple battery sizes using pre-computed eclipse fractions, simulates SOC over 10 orbits for worst-case RAAN, and evaluates cycle life margin. No orbital propagation — uses static eclipse table and simple energy balance.
 

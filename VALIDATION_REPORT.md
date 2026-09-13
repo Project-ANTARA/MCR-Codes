@@ -1,6 +1,8 @@
 # ANTARA Subsystem Validation Report
 
-Generated: 2026-09-10T03:28:15.704566
+> Captured subsystem-validation output; preserved during the 2026-09-12 documentation review without rerunning or changing its PASS/FAIL evidence. The [runtime report](docs/SIMULATION_RUNTIME_FIX_REPORT.md) covers separate targeted regressions and a 60-hour Science run. Those results do not override the subsystem failures recorded here. Use the [README](README.md#subsystem-validation-stage-4) for regeneration instructions.
+
+Generated: 2026-09-12T02:45:34.025420
 Repository: ANTARA CubeSat Mission Simulation
 
 ## Summary
@@ -66,31 +68,31 @@ org.orekit.errors.OrekitException: no IERS UTC-TAI history data loaded
 
 #### Stdout
 ```
-[WARN] pyIGRF not found. Falling back to dipole B-field for IGRF queries.
-[WARN] spacepy not found. AP9 comparison layer disabled.
 ======================================================================
 IGRF MAGNETIC FIELD VALIDATION TEST
 ======================================================================
 Reference: NOAA/NCEI IGRF-13 online calculator
 Test points: 17 locations spanning SAA and globe
 Epoch: 2000.25 (matching sim start 2000-03-01)
-   1. SAA core                       | Ref:  22500 nT | Model:  44329 nT | Error: 97.02% | FAIL
-   2. SAA core                       | Ref:  24800 nT | Model:  42937 nT | Error: 73.13% | FAIL
-   3. SAA core                       | Ref:  26200 nT | Model:  41342 nT | Error: 57.79% | FAIL
-   4. SAA edge                       | Ref:  21800 nT | Model:  45497 nT | Error: 108.70% | FAIL
-   5. SAA edge                       | Ref:  28500 nT | Model:  47093 nT | Error: 65.24% | FAIL
-   6. SAA boundary                   | Ref:  31200 nT | Model:  47499 nT | Error: 52.24% | FAIL
-   7. SAA boundary                   | Ref:  33500 nT | Model:  47635 nT | Error: 42.19% | FAIL
-   8. Equator, Atlantic              | Ref:  34200 nT | Model:  47635 nT | Error: 39.28% | FAIL
-   9. Equator, Indian Ocean          | Ref:  35800 nT | Model:  47635 nT | Error: 33.06% | FAIL
-  10. India (GS)                     | Ref:  39500 nT | Model:  42937 nT | Error:  8.70% | FAIL
-  11. Mid-latitude                   | Ref:  48200 nT | Model:  37658 nT | Error: 21.87% | FAIL
-  12. Svalbard (GS2)                 | Ref:  54800 nT | Model:  25315 nT | Error: 53.81% | FAIL
-  13. Antarctic                      | Ref:  54800 nT | Model:  25315 nT | Error: 53.81% | FAIL
-  14. SAA core, 400km                | Ref:  28500 nT | Model:  48375 nT | Error: 69.74% | FAIL
-  15. SAA core, 800km                | Ref:  18200 nT | Model:  40723 nT | Error: 123.75% | FAIL
-  16. SAA core, 2020                 | Ref:  22100 nT | Model:  44329 nT | Error: 100.59% | FAIL
-  17. SAA...
+   1. SAA core                       | Ref:  22500 nT | Model:  18279 nT | Error: 18.76% | FAIL
+   2. SAA core                       | Ref:  24800 nT | Model:  18678 nT | Error: 24.69% | FAIL
+   3. SAA core                       | Ref:  26200 nT | Model:  19316 nT | Error: 26.27% | FAIL
+   4. SAA edge                       | Ref:  21800 nT | Model:  18240 nT | Error: 16.33% | FAIL
+   5. SAA edge                       | Ref:  28500 nT | Model:  19625 nT | Error: 31.14% | FAIL
+   6. SAA boundary                   | Ref:  31200 nT | Model:  20784 nT | Error: 33.38% | FAIL
+   7. SAA boundary                   | Ref:  33500 nT | Model:  22012 nT | Error: 34.29% | FAIL
+   8. Equator, Atlantic              | Ref:  34200 nT | Model:  22823 nT | Error: 33.27% | FAIL
+   9. Equator, Indian Ocean          | Ref:  35800 nT | Model:  27078 nT | Error: 24.36% | FAIL
+  10. India (GS)                     | Ref:  39500 nT | Model:  35249 nT | Error: 10.76% | FAIL
+  11. Mid-latitude                   | Ref:  48200 nT | Model:  40833 nT | Error: 15.29% | FAIL
+  12. Svalbard (GS2)                 | Ref:  54800 nT | Model:  42761 nT | Error: 21.97% | FAIL
+  13. Antarctic                      | Ref:  54800 nT | Model:  35463 nT | Error: 35.29% | FAIL
+  14. SAA core, 400km                | Ref:  28500 nT | Model:  19691 nT | Error: 30.91% | FAIL
+  15. SAA core, 800km                | Ref:  18200 nT | Model:  16995 nT | Error:  6.62% | FAIL
+  16. SAA core, 2020                 | Ref:  22100 nT | Model:  17942 nT | Error: 18.81% | FAIL
+  17. SAA core, 2025                 | Ref:  21700 nT | Model:  17869 nT | Error: 17.66% | FAIL
+
+==============================================...
 ```
 
 ### ADCS Detumble Time

@@ -1,189 +1,112 @@
 # ANTARA_Science_Sim.py
 
-## File Overview
-Science payload simulation for the ANTARA mission with detailed proton flux modeling. Extends the high-fidelity simulation framework with: IGRF magnetic field model (via pyIGRF), AP9/AE9 radiation belt environment (via spacepy.irbempy), multi-layer detector physics (geometric factor, energy-dependent efficiency, dead time, dark counts), event-driven histogram packetization, and SAA flux depth scaling. Includes full ADCS, EPS, FSM, telemetry, and plotting (9-panel suite + science-specific plots). Configurable via CLI arguments.
+## Overview
 
-**Core models** (`MissionConfig`, `ADCSModel`, `SpacecraftFSM`, `SunSubmode`, `IllegalFSMTransitionError`, `_as_flat_vector`, `BODY_AXIS_VECTORS`) are now imported from the shared **`antara_models.py`** module (Orekit-free, numpy-only). This enables lightweight Monte Carlo scripts (`leop_detumble_mc.py`, validation tests) to reuse the same models without initializing the Orekit JVM.
+Science mission simulator with Orekit numerical propagation, ADCS, EPS, FSM, dual ground-station support, proton environment and detector models, CSV telemetry, and optional plots. Run from the repository root in the environment containing Orekit.
 
-## Dependencies
-- **Standard Library**: `math`, `argparse`, `json`, `os`, `pickle`, `time`, `dataclasses`, `enum`, `pathlib`, `typing`, `datetime`
-- **External**: `numpy`, `pandas`, `orekit`, `shapely`
-- **Optional External** (guarded with try/except): `matplotlib`, `cartopy`, `pyIGRF` (`ppigrf`), `spacepy.irbempy`
-- **Internal**: `paths` (`init_orekit_data`, `results_path`, `figures_path`), `antara_models` (`MissionConfig`, `ADCSModel`, `SpacecraftFSM`, `SunSubmode`, `IllegalFSMTransitionError`, `_as_flat_vector`, `BODY_AXIS_VECTORS`)
-- **Orekit/Java Modules**: Extensive (propagation, forces, frames, orbits, time, bodies, atmosphere, events)
+`MissionConfig`, `ADCSModel`, and body-axis definitions come from [antara_models.py](antara_models.md). The file also defines its own `EPSModel`, `SpacecraftFSM`, and `IllegalFSMTransitionError`, shadowing those shared imports. Do not assume the shared FSM drift guard alone verifies the simulator's local FSM.
 
-## Exports / Public API
+## Environment and physics backends
 
-### Module Constants
-| Constant | Type | Description |
-|----------|------|-------------|
-| `BODY_AXIS_VECTORS` | `Dict[str, np.ndarray]` | Canonical body axes (re-exported from `antara_models`) |
-| `_MATPLOTLIB_AVAILABLE` | `bool` | Matplotlib import status |
-| `_CARTOPY_AVAILABLE` | `bool` | Cartopy import status |
-| `_PYIGRF_AVAILABLE` | `bool` | pyIGRF import status |
-| `_SPACEPY_AVAILABLE` | `bool` | spacepy import status |
+Use the [root setup instructions](../README.md#quick-start), then:
 
-### Helper Functions
-
-#### `_as_flat_vector(vector) -> np.ndarray`
-Normalizes any vector-like input to flat float array (3,). **Re-exported from `antara_models`** — this version additionally handles Orekit `Vector3D` objects.
-
-#### `compute_detector_geometric_factor_cm2sr(theta_max_deg: float) -> float`
-Computes geometric factor G = 2π(1 - cos(θ_max)) for a conical FOV.
-
-### Classes
-
-#### `SunSubmode(str, Enum)`
-Power submodes within SUN_POINTING: CHARGING, PASSIVE, ECLIPSE, NONE. **Re-exported from `antara_models`**.
-
-#### `MissionConfig` (dataclass)
-**All mission parameters** — **re-exported from `antara_models`** with identical definition. Validation in `__post_init__` catches config errors early.
-
-#### `OrbitState` / `AttitudeCommand` (dataclasses)
-Same structure as Master. Uses Orekit `AbsoluteDate` and `Vector3D`.
-
-#### `ADCSModel`
-Attitude determination & control with quaternion dynamics, B-dot, wheel damping, saturation. **Re-exported from `antara_models`** with bug fixes:
-- Bug 11 fix: explicit re-normalization after quaternion integration step
-- Bug fix in `wheel_damp_control`: per-axis inertia-scaled damping (k_damp = 0.4/dt)
-- `_enforce_quaternion_continuity` tracks corrections by call site
-
-#### `EPSModel`
-Similar to Master with `payload_coin_logic_power_w` added to loads.
-
-#### `SAAModel`
-Shapely polygon, entry/exit detection, data accumulation.
-
-#### `GroundStationModel`
-Supports two ground stations (GS_INDIA + optional GS2_SVALBARD).
-
-#### `IGRFModel`
-**NEW** — Wrapper for pyIGRF magnetic field calculations.
-- `get_field(lat_deg, lon_deg, alt_km, year) -> Tuple[float, float, float]` — Returns (B_north, B_east, B_down) in nT
-- Falls back to dipole model if pyIGRF unavailable
-
-#### `ProtonEnvironmentModel`
-**NEW** — Proton flux modeling with AP9 baseline + SAA depth + asymmetries.
-- `get_flux(lat_deg, lon_deg, alt_km, saa_distance_frac, storm_flag) -> np.ndarray[5]` — Differential flux per energy channel
-- Flux = AP9_baseline × SAA_depth_factor × EW_asymmetry × storm_multiplier
-- SAA depth factor: linear interpolation between min/max based on normalized distance to SAA polygon
-- EW asymmetry: sinusoidal modulation by longitude
-
-#### `DetectorLayerSpec` (dataclass)
-Detector layer specification: `name`, `thickness_um`, `material`, `threshold_mev`, `geometric_factor_cm2sr`, `energy_range_mev`
-
-#### `PayloadModel`
-**NEW** — Detailed proton detector simulation.
-- **Attributes**: `config`, `detector_layers` (list of `DetectorLayerSpec`), `histogram_buffers` (per-channel counts), `total_counts`, `livetime_fraction`, `packets_generated`, `data_volume_mb`
-- **Methods**:
-  - `step(dt_sec, flux_per_channel, orbit_state, mode, battery_wh) -> Tuple[float, float]` — Accumulate counts, handle dead time, return (counts_this_step, data_mb_generated)
-  - `flush_histogram(orbit_state, mode) -> Dict` — Generate packet: header + 64 bins × 4 bytes per channel
-  - `compute_livetime(dt_sec, flux_per_channel) -> float` — Paralyzable dead time model
-
-#### `CommunicationsModel`
-Extended with dual-GS support and event-driven histogram downlink.
-
-#### `IllegalFSMTransitionError(RuntimeError)`
-Custom exception for FSM transition violations. **Re-exported from `antara_models`**.
-
-#### `SpacecraftFSM`
-7-state finite state machine with debounced fault logic. **Re-exported from `antara_models`** with additional `SAFE` exit condition: `battery_wh >= safe_exit_battery_fraction × capacity`, `fault_debounce_samples` / `recovery_debounce_samples` for hysteresis, `target_mode` tracking for slew coordination.
-
-#### `TelemetryLogger`
-Extended telemetry columns including science-specific fields (flux, counts, livetime, packet info, IGRF B-field).
-
-#### `ANTARAScienceSimulator`
-Top-level runner with science-specific logic.
-**Key Additional Methods**:
-- `_init_igrf()` — Initialize IGRF model
-- `_init_proton_environment()` — Initialize proton model
-- `_init_payload()` — Initialize detector layers (5 layers, 5 energy channels)
-- `_compute_saa_distance_frac(lat, lon) -> float` — Normalized distance to SAA polygon (0=center, 1=boundary)
-- `_update_science_payload(...)` — Step detector model, accumulate histograms
-- `_flush_science_packet(...)` — Event-driven packet flush on SAA exit or interval timeout
-- `_plot_science_results(...)` — Science-specific plots: proton flux map, detector counts, histogram timeline
-
-**CLI Arguments** (`_parse_args()`):
-- `--duration-hours` (default 24)
-- `--step-sec` (default 2.0)
-- `--raan-deg` (default 15.0)
-- `--battery-wh` (default 25.0)
-- `--output-dir` (default from paths)
-- `--no-plots` (disable plotting)
-- `--save-pickle` (save telemetry DataFrames as pickle)
-
-## Internal Logic
-
-### Simulation Loop (similar to Master with science extensions)
-1. Initialize IGRF, proton environment, payload detector
-2. Per timestep:
-   - Propagate orbit, build OrbitState
-   - Compute SAA distance fraction for flux scaling
-   - Run FSM evaluation (with SAFE exit on battery recovery)
-   - Update attitude guidance (LVLH-fixed frame in all operational modes)
-   - Step ADCS (detumble or operational)
-   - Compute power (EPS), step battery
-   - **Science payload step**: Get proton flux for current position → accumulate counts in histogram buffers with dead time
-   - **Event-driven flush**: On SAA exit or 60s interval timeout → generate packet, add to storage
-   - GS visibility (dual station), downlink if RELAY mode
-   - Log telemetry (extended columns)
-   - Physics sanity checks
-   - Progress reporting
-
-### Proton Flux Model
-```
-flux[channel] = ap9_baseline_flux[channel]
-              × saa_depth_factor(distance_to_saa)
-              × (1 + ew_asymmetry_amplitude × sin(longitude))
-              × (storm_time_flux_multiplier if storm_flag else 1.0)
-```
-- `saa_depth_factor`: linear from `saa_depth_flux_min` (boundary) to `saa_depth_flux_max` (center)
-
-### Detector Physics
-- **Geometric factor**: G = 2π(1 - cos(θ_max)) per layer
-- **Count rate**: flux × G × efficiency × ΔE (energy bin width)
-- **Dead time**: Paralyzable model — `livetime = exp(-rate × dead_time)`
-- **Dark counts**: Added per channel at `detector_dark_count_rate_hz`
-- **Coincidence**: Optional anti-coincidence logic between layers
-
-### Packetization
-- **Event-driven**: Flush on SAA pass closure (primary) or 60s timeout (safety)
-- **Packet size**: 5 channels × 64 bins × 4 bytes + 16 byte header = 1,296 bytes
-- **Downlink**: 19.2 kbps → ~2.4 KB/s, can downlink ~1 packet per second
-
-## Usage Example
 ```bash
-# Run from repository root
-python src/ANTARA_Science_Sim.py --duration-hours 24 --step-sec 2.0
-
-# With custom RAAN and battery
-python src/ANTARA_Science_Sim.py --raan-deg 60 --battery-wh 30
-
-# Disable plots (faster, no matplotlib/cartopy needed)
-python src/ANTARA_Science_Sim.py --no-plots
-
-# Save DataFrames as pickle for later analysis
-python src/ANTARA_Science_Sim.py --save-pickle
+conda activate orekit_env
+python scripts/verify_physics_dependencies.py
 ```
 
-## Output Files (in `results/science/` and `figures/science/`)
-- `science_telemetry.csv` — Per-step telemetry with science columns
-- `science_packets.csv` — Generated histogram packets
-- `science_saa_passes.csv` — SAA passes with flux integrals
-- `science_gs_contacts.csv` — Dual GS contacts
-- `science_mode_transitions.csv` — FSM transitions
-- `science_slew_events.csv` — Slew events
-- `science_detumble_events.csv` — Detumble events
-- `ANTARA_Science_mission_overview.png` — 9-panel PDR plot
-- `ANTARA_Science_proton_analysis.png` — Proton flux map, detector counts
-- `ANTARA_Science_attitude_diagnostics.png` — Pointing error diagnostics
+Core dependencies include Orekit, NumPy, pandas, and Shapely. Plot imports are guarded. The verified physics packages are `ppigrf==2.1.0` and `spacepy==0.7.0`; CI installs both into Micromamba environment `antara`. Local Micromamba is not required.
 
-## Notes / TODOs
-- **Massive file**: 6247 lines — significant duplication with `ANTARA_Master.py` (ADCS, EPS, FSM, telemetry, plotting)
-- **Optional dependencies**: pyIGRF and spacepy provide enhanced physics but simulation runs with fallbacks (dipole B-field, no AP9)
-- **LVLH-fixed attitude**: Unlike Master, all operational modes (SUN_POINTING, DETECTION, RELAY) hold continuous LVLH frame — no active tracking
-- **Event-driven packets**: Novel approach tying readout to spatial cell crossings rather than fixed timer
-- **CLI configurable**: More flexible than hardcoded Master/MCR scripts
-- **Bug fixes**: Includes fixes for quaternion continuity (Bug 11) and wheel damping instability
-- **Validation**: Comprehensive `__post_init__` in MissionConfig catches config errors early
-- **Dual GS**: Svalbard station optional (disabled by default) for high-latitude contacts
+### IGRF
+
+`IGRFModel(epoch_year)` exposes:
+
+- `get_ned_field_tesla(lat_deg, lon_deg, alt_km)`: shape `(3,)`, North/East/Down in Tesla.
+- `get_inertial_field_tesla(lat_deg, lon_deg, alt_km, position_inertial)`: converts the field for pitch-angle calculations.
+
+The backend is `ppigrf.igrf(lon, lat, altitude_km, date)`, returning East/North/Up arrays in nT. Version 2.1.0 defaults to IGRF-14 coefficients. The historical `_PYIGRF_AVAILABLE` flag describes **ppigrf** availability; it does not imply a `pyIGRF` import. Missing ppigrf warns and falls back to a centered dipole.
+
+Altitude must remain in kilometers at the backend boundary. The existing epoch mapping uses March 1 of the configured integer year, and the inertial conversion is an approximate static rotation rather than a full Earth-fixed/time-dependent frame transform.
+
+### Proton environment and AP9 limitation
+
+`ProtonEnvironmentModel(config, saa_polygon)` provides `get_ap9_flux(lat_deg, lon_deg, alt_km)` and `compute_flux(...)`. The latter combines the baseline with SAA depth, magnetic pitch angle, east-west asymmetry, storm scaling, and detector response.
+
+SpacePy's `get_AEP8` supports AE8/AP8, **not AP9**. The current AP9 call also uses an invalid `irbem.Coords` lookup and unsupported keyword arguments. It returns the configured `ap9_baseline_flux` after failure and emits one explanatory warning per model instance. Missing SpacePy also selects that baseline. This baseline feeds primary simulated flux, not just comparison plots.
+
+`scripts/verify_physics_dependencies.py` verifies an actual IRBEM/AP8 query; it does not validate live AP9. The SpacePy `ae9ap9` module reads model output files rather than running AP9. Do not interpret successful SpacePy imports as AP9 model availability.
+
+## CLI and scenario precedence
+
+Run `python src/ANTARA_Science_Sim.py --help` for supported options.
+
+| Option | Behavior |
+| --- | --- |
+| `--scenario` | `leop_24h`, `no_leop_24h`, or `leop_1yr` preset |
+| `--duration-hours` | Explicit duration overrides preset; 24 hours without a preset |
+| `--step-sec` | Explicit fine step; also selects the coarse step unless supplied separately |
+| `--coarse-step-sec` | Explicit coarse step for multirate operation; preset/global default 20 seconds |
+| `--rng-seed` | Explicit RNG seed overrides configuration default |
+| `--no-periphery-merge` | Disable adaptive periphery bin merging |
+| `--no-plots` | Skip plot generation, including with a scenario |
+| `--checkpoint-every-hours` | Request periodic checkpointing |
+| `--resume-from` | Load a saved checkpoint |
+
+Precedence is **explicit CLI > scenario preset > global defaults**. `_parse_args(argv=None)` distinguishes omitted numeric values with `None`; `_config_from_args(args)` returns the validated configuration and LEOP-skip flag. Scenarios import `MissionConfig` directly from `antara_models` to avoid importing the running simulator twice.
+
+Preset durations are 24, 24, and 8760 hours respectively. `no_leop_24h` starts in SUN_POINTING; the other presets retain startup sequencing. Preset-only runs retain multirate behavior. To request fixed two-second stepping, supply `--step-sec 2` without a separate coarse step.
+
+```bash
+# CI-equivalent fixed-step runs
+python src/ANTARA_Science_Sim.py --scenario leop_24h --duration-hours 1 --step-sec 2 --no-plots
+python src/ANTARA_Science_Sim.py --scenario no_leop_24h --duration-hours 1 --step-sec 2 --no-plots
+
+# Annual preset with explicit multirate controls
+python src/ANTARA_Science_Sim.py --scenario leop_1yr --step-sec 2 --coarse-step-sec 30 --no-plots
+```
+
+RAAN and battery capacity are configuration fields, not `--raan-deg` or `--battery-wh` CLI options. There are no `--output-dir` or `--save-pickle` options. Configure `output_tag` through `MissionConfig` when constructing runs programmatically. Only resume trusted checkpoint files.
+
+Checkpoint CLI switches exist, but `run()` currently initializes its loop clock to zero; exact continuation has not been verified. Do not rely on checkpoint/resume to preserve annual-run chronology without testing it. See [scenario and output guidance](scenarios.md). The detumble progress bar belongs to the separate [Monte Carlo runner](leop_detumble_mc.md); Science retains its periodic `[Progress]` lines.
+
+## Attitude geometry
+
+Quaternions are scalar-first `[w, x, y, z]`, mapping body to inertial. Body axes remain +X=RAM/payload, +Y=nadir/relay, +Z=sun-panel.
+
+Constructor `_run_geometric_self_tests()` checks identity rotation, 90-degree yaw, detection +X/+Z, relay +Y/+Z, inertial/body vector round trip, and quaternion/DCM round trip. `_assert_axis_alignment()` uses normalized vectors and:
+
+```python
+degrees(atan2(norm(cross(a, b)), clip(dot(a, b), -1, 1)))
+```
+
+The alignment bound remains `1e-6` degrees. It tests numerical frame construction, not spacecraft pointing performance. Valid built-in alignment residuals were at most `1.81e-14` degrees; negative tests at 0.01, 0.1, and 1 degree still raise assertions. See the [repair report](../OPENCODE_PHYSICS_ATTITUDE_FIX_REPORT.md) for full precision evidence.
+
+## Output and verification
+
+### Runtime tracking and multirate accounting
+
+RELAY acquisition refreshes the actual ground-station LOS during SLEWING and operational tracking. The estimated slew timer alone cannot end acquisition: the attitude must converge and settle. Moving-target settling counts consecutive time within the configured pointing accuracy, rather than restarting the settling clock for each new target sample. Slew speed is preserved across updates within an ongoing maneuver. Pointing validity and beamwidth assertions remain enabled at their existing limits.
+
+SUN_POINTING checks both the achieved attitude and the retained target against the current RAM/nadir geometry. A stale target outside the 5-degree hard limit forces a command refresh, including when the requested command is unchanged. This prevents the 7.5-degree hold deadband from allowing convergence to an invalid target. The hard limit, finite slew dynamics, and settling requirements are unchanged; this is a tracking fix, not a tolerance increase.
+
+Wheel saturation intentionally freezes inertial attitude while unloading. It cannot complete a pending slew; the original objective must be reacquired after release. During hold, diagnostics check rotation validity, telemetry consistency, and alignment with the frozen target rather than nominal RAM/LOS tracking. Nominal limits apply again after release, and science/transmission are gated off throughout hold. Frozen SLEWING uses the pending mode's pointing budget and evaluates the existing saturation-timeout SAFE policy before its completion timer. Recovery thresholds are unchanged.
+
+Startup (including DETUMBLE), SLEWING, DETECTION, and RELAY use the fine cadence. Other modes may use the coarse interval. Each iteration uses the same selected interval for dynamics, EPS, payload, mode-time accumulation, and the simulation clock; EPS is advanced once. This corrects the former 20-second clock/2-second detumble mismatch and duplicate battery update.
+
+The earlier 14-test result below records the dependency repair. The current regression suite additionally covers moving-target settling, slew completion, timestep accounting, and multiprocessing; see [runtime repair verification](SIMULATION_RUNTIME_FIX_REPORT.md).
+
+Paths are routed through [paths.py](paths.md). Prepare root-level Orekit data before constructing the simulator. Scenario outputs use `results/science/<tag>_ANTARA_Science_<name>.csv`, with names:
+
+- `telemetry`, `saa_passes`, `gs_contacts`, `mode_transitions`
+- `slew_events`, `detumble_events`, `rejected_transitions`, `proton_passes`
+
+Without an output tag, the prefix is simply `ANTARA_Science_`. Plots use `figures/science/` and are skipped by `--no-plots`. Reusing a tag overwrites earlier outputs.
+
+Telemetry uses elapsed `time_sec`; derive absolute timestamps from the configured start date. The verified one-hour runs produced 1,801 rows from 0 through 3600 seconds inclusive, at exactly two-second intervals. Neither entered DETECTION, so they establish startup/run completion rather than SAA science fidelity.
+
+```bash
+PYTHONPATH=src python -m pytest tests/test_physics_attitude.py tests/test_detumble_multiprocessing.py tests/test_fsm_spec_matches_code.py -v
+python -m py_compile src/*.py
+```
+
+The original dependency repair passed 14 tests. Subsequent verification completed 60 hours of the annual preset: 17,758 rows, two-/20-second cadence, saturation → SAFE → SUN_POINTING recovery, and worst settled, non-held pointing error 4.999973° below 5°. See [runtime evidence](SIMULATION_RUNTIME_FIX_REPORT.md). Full-year and subsystem validation are separate; old generated reports must be read with their date and environment. Use `pd.read_csv(path, low_memory=False)` for the mixed-type optional science columns.

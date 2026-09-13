@@ -1,5 +1,11 @@
 # ANTARA_drag_study.py
 
+## Current scope (2026-09-12)
+
+Source: [ANTARA_drag_study.py](../src/ANTARA_drag_study.py). This separate trade uses the same 60-second RK4 integration and daily altitude sampling as [finalconfig](ANTARA_drag_finalconfig.md), but different areas and multiplier. The 450 km cutoff is not actual reentry. It has no Science scenario CLI or detumble progress-bar options; output remains console tables.
+
+Setup and navigation: [repository README](../README.md) · [documentation index](README.md). Supporting study results were not rerun as part of this documentation review.
+
 ## File Overview
 Orbital lifetime trade study comparing 4 solar array configurations for the ANTARA 3U CubeSat. Computes drag-limited lifetime vs. initial altitude (500–600 km) for each configuration under solar maximum conditions. Uses `TUMBLING_FACTOR = 1.0` (no tumbling multiplier, unlike `ANTARA_drag_finalconfig.py`).
 
@@ -14,7 +20,7 @@ Identical to `ANTARA_drag_finalconfig.py`.
 | `MASS` | 4.0 kg | Spacecraft mass |
 | `CD` | 2.2 | Drag coefficient |
 | `TUMBLING_FACTOR` | 1.0 | **No tumbling multiplier** (vs 1.5 in finalconfig) |
-| `END_ALT` | 450000.0 m | Reentry termination altitude |
+| `END_ALT` | 450000.0 m | Study cutoff altitude, not physical reentry |
 | `areas` | Dict | 4 configurations with cross-sections |
 
 ### Configurations Tested

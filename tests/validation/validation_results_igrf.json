@@ -10,8 +10,8 @@
       "alt_km": 600,
       "year": 2000.25,
       "ref_mag_nT": 22500,
-      "model_mag_nT": 44329.463446811314,
-      "error_pct": 97.01983754138362,
+      "model_mag_nT": 18278.758486729523,
+      "error_pct": 18.761073392313232,
       "passed": false
     },
     {
@@ -22,8 +22,8 @@
       "alt_km": 600,
       "year": 2000.25,
       "ref_mag_nT": 24800,
-      "model_mag_nT": 42937.21201460018,
-      "error_pct": 73.13391941371042,
+      "model_mag_nT": 18678.08267136504,
+      "error_pct": 24.685150518689362,
       "passed": false
     },
     {
@@ -34,8 +34,8 @@
       "alt_km": 600,
       "year": 2000.25,
       "ref_mag_nT": 26200,
-      "model_mag_nT": 41342.230543530095,
-      "error_pct": 57.79477306690875,
+      "model_mag_nT": 19316.052882142587,
+      "error_pct": 26.274607320066462,
       "passed": false
     },
     {
@@ -46,8 +46,8 @@
       "alt_km": 600,
       "year": 2000.25,
       "ref_mag_nT": 21800,
-      "model_mag_nT": 45497.03131480305,
-      "error_pct": 108.70197850827086,
+      "model_mag_nT": 18239.93775864014,
+      "error_pct": 16.33056074018285,
       "passed": false
     },
     {
@@ -58,8 +58,8 @@
       "alt_km": 600,
       "year": 2000.25,
       "ref_mag_nT": 28500,
-      "model_mag_nT": 47092.84544105879,
-      "error_pct": 65.23805417915364,
+      "model_mag_nT": 19625.39553615412,
+      "error_pct": 31.13896303103818,
       "passed": false
     },
     {
@@ -70,8 +70,8 @@
       "alt_km": 600,
       "year": 2000.25,
       "ref_mag_nT": 31200,
-      "model_mag_nT": 47498.67679896923,
-      "error_pct": 52.239348714644976,
+      "model_mag_nT": 20784.10297039422,
+      "error_pct": 33.384285351300576,
       "passed": false
     },
     {
@@ -82,8 +82,8 @@
       "alt_km": 600,
       "year": 2000.25,
       "ref_mag_nT": 33500,
-      "model_mag_nT": 47634.559859725974,
-      "error_pct": 42.19271599918201,
+      "model_mag_nT": 22011.62055271919,
+      "error_pct": 34.29366999188302,
       "passed": false
     },
     {
@@ -94,8 +94,8 @@
       "alt_km": 600,
       "year": 2000.25,
       "ref_mag_nT": 34200,
-      "model_mag_nT": 47634.559859725974,
-      "error_pct": 39.28233877112858,
+      "model_mag_nT": 22823.07961133565,
+      "error_pct": 33.26584908966185,
       "passed": false
     },
     {
@@ -106,8 +106,8 @@
       "alt_km": 600,
       "year": 2000.25,
       "ref_mag_nT": 35800,
-      "model_mag_nT": 47634.559859725974,
-      "error_pct": 33.05742977577088,
+      "model_mag_nT": 27078.097762978563,
+      "error_pct": 24.362855410674406,
       "passed": false
     },
     {
@@ -118,8 +118,8 @@
       "alt_km": 600,
       "year": 2000.25,
       "ref_mag_nT": 39500,
-      "model_mag_nT": 42937.21201460018,
-      "error_pct": 8.70180256860806,
+      "model_mag_nT": 35248.65026386482,
+      "error_pct": 10.762910724392851,
       "passed": false
     },
     {
@@ -130,8 +130,8 @@
       "alt_km": 600,
       "year": 2000.25,
       "ref_mag_nT": 48200,
-      "model_mag_nT": 37658.42612409121,
-      "error_pct": 21.87048521972778,
+      "model_mag_nT": 40832.535594468034,
+      "error_pct": 15.285195862099515,
       "passed": false
     },
     {
@@ -142,8 +142,8 @@
       "alt_km": 600,
       "year": 2000.25,
       "ref_mag_nT": 54800,
-      "model_mag_nT": 25314.551051304235,
-      "error_pct": 53.80556377499227,
+      "model_mag_nT": 42761.1232185561,
+      "error_pct": 21.968753250810032,
       "passed": false
     },
     {
@@ -154,8 +154,8 @@
       "alt_km": 600,
       "year": 2000.25,
       "ref_mag_nT": 54800,
-      "model_mag_nT": 25314.551051304235,
-      "error_pct": 53.80556377499227,
+      "model_mag_nT": 35462.53639262879,
+      "error_pct": 35.28734234921754,
       "passed": false
     },
     {
@@ -166,8 +166,8 @@
       "alt_km": 400,
       "year": 2000.25,
       "ref_mag_nT": 28500,
-      "model_mag_nT": 48374.81103419389,
-      "error_pct": 69.73617906734697,
+      "model_mag_nT": 19691.426691065786,
+      "error_pct": 30.907274768190224,
       "passed": false
     },
     {
@@ -178,8 +178,8 @@
       "alt_km": 800,
       "year": 2000.25,
       "ref_mag_nT": 18200,
-      "model_mag_nT": 40722.8866469876,
-      "error_pct": 123.7521244339978,
+      "model_mag_nT": 16994.785537251017,
+      "error_pct": 6.6220574876317775,
       "passed": false
     },
     {
@@ -190,8 +190,8 @@
       "alt_km": 600,
       "year": 2020.0,
       "ref_mag_nT": 22100,
-      "model_mag_nT": 44329.463446811314,
-      "error_pct": 100.5858074516349,
+      "model_mag_nT": 17942.394298431984,
+      "error_pct": 18.81269548220822,
       "passed": false
     },
     {
@@ -202,8 +202,8 @@
       "alt_km": 600,
       "year": 2025.0,
       "ref_mag_nT": 21700,
-      "model_mag_nT": 44329.463446811314,
-      "error_pct": 104.28324169037472,
+      "model_mag_nT": 17868.75788313995,
+      "error_pct": 17.655493626083175,
       "passed": false
     }
   ]

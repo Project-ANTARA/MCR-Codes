@@ -1772,6 +1772,16 @@ class SpacecraftFSM:
             pointing_budget_limit_deg,
         )
 
+        if self.current_mode == "SLEWING" and adcs_saturation_hold_active:
+            # A timer cannot complete a frozen maneuver or mask the existing
+            # saturation timeout / SAFE recovery policy.
+            fault_mode = self._handle_fault_overrides(
+                battery_wh, adcs_saturation_hold_active, saturation_hold_duration_sec,
+                pointing_budget_error_deg, pointing_budget_limit_deg,
+            )
+            if fault_mode is not None:
+                return fault_mode
+
         slew_mode = self._handle_slewing_progression(battery_wh)
         if slew_mode is not None:
             return slew_mode
@@ -3064,6 +3074,16 @@ class ANTARAScienceSimulator:
         grace_complete = self._steps_since_mode_transition >= self.config.mode_transition_grace_steps
         self._assert_rotation_consistency("Current ADCS attitude", self.adcs.current_quaternion)
         self._assert_rotation_consistency("Target ADCS attitude", self.adcs.target_quaternion)
+        # Momentum unloading deliberately holds inertial attitude, not RAM/LOS.
+        # Validate that physical hold instead of declaring it nominal tracking.
+        # Telemetry consistency checks below remain active in either state.
+        tracking_enabled = not self.adcs.saturation_hold_active
+        if not tracking_enabled:
+            for axis in ("+X", "+Y", "+Z"):
+                self._assert_axis_alignment(
+                    "Saturation hold", self.adcs.current_quaternion, axis,
+                    self._body_axis_to_inertial(self.adcs.target_quaternion, axis), 1.0e-6,
+                )
         if mode == "DETECTION":
             payload_error_deg = self._compute_payload_pointing_error_deg(orbit_state)
             if abs(payload_error_deg - self.current_payload_pointing_error_deg) > 1.0e-6:
@@ -3081,6 +3101,7 @@ class ANTARAScienceSimulator:
             if (
                 not self.adcs.is_slewing
                 and not self.adcs.settling
+                and tracking_enabled
                 and payload_error_deg > 90.0
                 and grace_complete
             ):
@@ -3108,7 +3129,7 @@ class ANTARAScienceSimulator:
                             },
                         )
                     )
-            if not self.adcs.is_slewing and not self.adcs.settling and combined_error_deg > self.config.sun_pointing_hard_limit_deg and grace_complete:
+            if tracking_enabled and not self.adcs.is_slewing and not self.adcs.settling and combined_error_deg > self.config.sun_pointing_hard_limit_deg and grace_complete:
                 raise AssertionError(
                     self._attitude_diagnostic_message(
                         f"SUN_POINTING combined error {combined_error_deg:.6f} deg exceeds hard limit",
@@ -3146,7 +3167,7 @@ class ANTARAScienceSimulator:
                             },
                         )
                     )
-            if gs_visible and relay_error_deg > self.config.relay_pointing_valid_deg and grace_complete:
+            if tracking_enabled and gs_visible and relay_error_deg > self.config.relay_pointing_valid_deg and grace_complete:
                 raise AssertionError(
                     self._attitude_diagnostic_message(
                         f"RELAY pointing error {relay_error_deg:.6f} deg exceeds valid band",
@@ -3157,7 +3178,7 @@ class ANTARAScienceSimulator:
                         },
                     )
                 )
-            if gs_visible and gs_off_boresight_deg > self.config.directional_antenna_half_beamwidth_deg and grace_complete:
+            if tracking_enabled and gs_visible and gs_off_boresight_deg > self.config.directional_antenna_half_beamwidth_deg and grace_complete:
                 raise AssertionError(
                     self._attitude_diagnostic_message(
                         f"RELAY GS off-boresight {gs_off_boresight_deg:.6f} deg exceeds beamwidth",
@@ -3592,6 +3613,8 @@ class ANTARAScienceSimulator:
     def _hard_pointing_limit_for_mode(self, mode: str) -> float:
         """Return the hard enforcement limit for the current operational mode."""
 
+        if mode == "SLEWING" and self.adcs.saturation_hold_active:
+            mode = self.target_mode
         if mode == "DETECTION":
             return self.config.detection_pointing_hard_limit_deg
         if mode == "RELAY":
@@ -3603,6 +3626,8 @@ class ANTARAScienceSimulator:
     def _hard_pointing_error_for_mode(self, mode: str, orbit_state: OrbitState, gs_visible: bool) -> float:
         """Return the relevant pointing error used for hard enforcement."""
 
+        if mode == "SLEWING" and self.adcs.saturation_hold_active:
+            mode = self.target_mode
         payload_error_deg = self._compute_payload_pointing_error_deg(orbit_state)
         relay_error_deg = self._compute_relay_pointing_error_deg(orbit_state, self.adcs.commanded_relay_axis or "+Y", gs_visible)
         if mode == "DETECTION":
@@ -3613,16 +3638,18 @@ class ANTARAScienceSimulator:
             return self._compute_sun_pointing_error_deg(orbit_state)
         return 0.0
 
-    def _compute_sun_pointing_error_deg(self, orbit_state: OrbitState) -> float:
+    def _compute_sun_pointing_error_deg(
+        self, orbit_state: OrbitState, quaternion: Optional[np.ndarray] = None,
+    ) -> float:
         """Return the combined SUN_POINTING error against RAM and nadir."""
 
-        payload_error_deg = self._compute_payload_pointing_error_deg(orbit_state)
-        nadir_error_deg = self._compute_relay_pointing_error_deg(
-            orbit_state,
-            self.adcs.commanded_relay_axis or "+Y",
-            False,
+        attitude = self.adcs.current_quaternion if quaternion is None else quaternion
+        return max(
+            self._vector_angle_deg(self._body_axis_to_inertial(attitude, "+X"),
+                                   self._velocity_vector_unit(orbit_state)),
+            self._vector_angle_deg(self._body_axis_to_inertial(attitude, "+Y"),
+                                   self._nadir_vector_unit(orbit_state)),
         )
-        return max(payload_error_deg, nadir_error_deg)
 
     def _derive_sun_submode(self, mode: str, sun_visible: bool, battery_wh: float) -> str:
         """Derive the current SUN_POINTING submode from power state."""
@@ -3634,6 +3661,18 @@ class ANTARAScienceSimulator:
         if battery_wh >= self.config.charging_complete_threshold_wh:
             return SunSubmode.PASSIVE
         return SunSubmode.CHARGING
+
+    def _update_relay_tracking_settlement(self, orbit_state: OrbitState, gs_visible: bool, dt_sec: float) -> None:
+        """Accumulate settling time while following a moving LOS, not a fixed quaternion."""
+        error = self._compute_relay_pointing_error_deg(orbit_state, "+Y", gs_visible)
+        if not gs_visible or error > self.config.pointing_accuracy_deg or self.adcs.saturation_hold_active:
+            self._relay_tracking_valid_sec = 0.0
+            return
+        self._relay_tracking_valid_sec = getattr(self, "_relay_tracking_valid_sec", 0.0) + dt_sec
+        remaining = max(0.0, self.config.settling_time_sec - self._relay_tracking_valid_sec)
+        self.adcs.settling_time_remaining_sec = remaining
+        self.adcs.settling = remaining > 0.0
+        self.adcs.settled_time_sec = max(0.0, self._relay_tracking_valid_sec - self.config.settling_time_sec)
 
     def _update_attitude_guidance(
         self,
@@ -3655,8 +3694,24 @@ class ANTARAScienceSimulator:
         freeze_budget_error_deg = self._hard_pointing_error_for_mode(freeze_budget_mode, orbit_state, gs_visible)
 
         if mode == "SLEWING":
+            if self.target_mode == "RELAY" and gs_visible:
+                command = self._get_attitude_command("RELAY", orbit_state, sun_visible, battery_wh, gs_visible)
+                self.adcs.command_attitude(command.quaternion, "SLEWING", command.primary_objective,
+                                           force_update=True)
+                self.current_attitude_command = command
+                self.adcs.commanded_relay_axis = command.relay_axis_label or "+Y"
+            elif not self.adcs.saturation_hold_active and self.current_attitude_command is not None:
+                # Saturation replaces the ADCS target with a frozen quaternion.
+                # Once unloading ends, restore the pending maneuver objective.
+                pending_error, _ = self.adcs.compute_slew(
+                    self.adcs.target_quaternion, self.current_attitude_command.quaternion)
+                if pending_error > self.config.pointing_accuracy_deg:
+                    self.adcs.command_attitude(
+                        self.current_attitude_command.quaternion, "SLEWING",
+                        self.current_attitude_command.primary_objective, force_update=True)
             self.adcs.advance(dt_sec)
-            self.adcs.is_slewing = time_sec < self.slew_end_time_sec
+            if self.target_mode == "RELAY":
+                self._update_relay_tracking_settlement(orbit_state, gs_visible, dt_sec)
             self.current_attitude_error_deg = self.adcs.get_pointing_error_deg()
             self.current_sun_incidence_angle_deg = self._compute_noisy_sun_incidence_angle_deg(orbit_state, mode)
             self.current_payload_pointing_error_deg = self._compute_payload_pointing_error_deg(orbit_state)
@@ -3716,6 +3771,15 @@ class ANTARAScienceSimulator:
             return
 
         command = self._get_attitude_command(mode, orbit_state, sun_visible, battery_wh, gs_visible)
+        # A deadband can retain an old LVLH target outside the pointing budget
+        # even while the current attitude is still inside it. advance() may snap
+        # to that target and report settled. Check the destination as well as
+        # the achieved attitude, including the unchanged-command fast path.
+        stale_sun_target = (
+            mode == "SUN_POINTING"
+            and self._compute_sun_pointing_error_deg(orbit_state, self.adcs.target_quaternion)
+            > hard_pointing_limit_deg
+        )
         if self.current_attitude_command is None:
             self.adcs.set_initial_quaternion(command.quaternion)
             self.current_attitude_command = command
@@ -3733,7 +3797,9 @@ class ANTARAScienceSimulator:
             return
 
         if (
-            self.current_attitude_command.active_attitude_target == command.active_attitude_target
+            not stale_sun_target
+            and hard_pointing_error_deg <= hard_pointing_limit_deg
+            and self.current_attitude_command.active_attitude_target == command.active_attitude_target
             and np.allclose(command.quaternion, self.current_attitude_command.quaternion, atol=1.0e-12, rtol=0.0)
             and command.primary_objective == self.current_attitude_command.primary_objective
         ):
@@ -3751,7 +3817,11 @@ class ANTARAScienceSimulator:
             self.current_gs_off_boresight_deg = self._compute_gs_off_boresight_deg(orbit_state, gs_visible)
             return
 
-        force_update = hard_pointing_error_deg > hard_pointing_limit_deg
+        force_update = (
+            (mode == "RELAY" and gs_visible)
+            or stale_sun_target
+            or hard_pointing_error_deg > hard_pointing_limit_deg
+        )
 
         mode_deadband_deg = self._attitude_deadband_for_mode(mode)
         self.adcs.command_attitude(
@@ -3767,6 +3837,8 @@ class ANTARAScienceSimulator:
 
         self.adcs.advance(dt_sec)
 
+        if mode == "RELAY":
+            self._update_relay_tracking_settlement(orbit_state, gs_visible, dt_sec)
         self.current_attitude_error_deg = self.adcs.get_pointing_error_deg()
         self.current_sun_incidence_angle_deg = self._compute_noisy_sun_incidence_angle_deg(orbit_state, mode)
         self.current_payload_pointing_error_deg = self._compute_payload_pointing_error_deg(orbit_state)
@@ -3896,69 +3968,14 @@ class ANTARAScienceSimulator:
         gs_visible: bool,
         time_sec: float,
     ) -> bool:
-        """Enter SLEWING and command the target attitude for the requested mode.
+        """Begin acquisition; moving RELAY targets are refreshed during the slew."""
 
-        FIX (Bug C): For RELAY slews the GS moves ~1-2 deg/s relative to the
-        spacecraft during the slew.  The original code used the instantaneous GS
-        LOS at slew START, producing a target that was already 60-120 deg stale
-        by slew completion.  The fix propagates the GS LOS forward in time by
-        the estimated slew duration using the angular velocity of the GS vector
-        (cross-product of the satellite velocity and GS LOS, divided by range).
-        The predicted position is used as the slew target quaternion so the
-        antenna is pointing at where the GS will be when the slew ends.
-        """
-
-        if target_mode == "RELAY" and gs_visible:
-            # Estimate slew duration using current attitude vs a candidate target
-            candidate_command = self._get_attitude_command(target_mode, orbit_state, sun_visible, battery_wh, gs_visible)
-            _, estimated_duration_sec = self._calculate_slew_duration_sec(candidate_command.quaternion)
-
-            # Propagate GS LOS forward by estimated_duration_sec.
-            # Angular velocity of GS LOS ≈ (v_sat × r_gs_unit) / |r_gs|
-            # where r_gs is the inertial vector from spacecraft to GS.
-            gs_los_unit = self._ground_station_vector_unit(orbit_state)
-            sat_vel = self._vector_to_numpy(orbit_state.sat_velocity_inertial)
-            # Approximate GS range (GS is on Earth surface, ~6371+70 km from geocenter)
-            sat_pos_mag = float(np.linalg.norm(self._vector_to_numpy(orbit_state.sat_position_inertial)))
-            gs_range_approx = max(sat_pos_mag * 0.5, 500_000.0)   # lower-bound 500 km
-            # Angular velocity of LOS vector (rad/s)
-            omega_los = np.cross(sat_vel, gs_los_unit) / gs_range_approx
-            # Predict LOS after estimated_duration_sec: rotate gs_los_unit by omega*dt
-            angle_rad = float(np.linalg.norm(omega_los)) * estimated_duration_sec
-            if angle_rad > 1.0e-9:
-                rot_axis = omega_los / np.linalg.norm(omega_los)
-                predicted_los = self._rotate_vector_by_axis_angle(gs_los_unit, rot_axis, angle_rad)
-            else:
-                predicted_los = gs_los_unit
-
-            # Clamp predicted LOS to unit sphere
-            predicted_los = self._unit_numpy(predicted_los)
-
-            z_reference = self._orbit_normal_unit(orbit_state)
-            if float(np.linalg.norm(self._project_orthogonal(z_reference, predicted_los))) <= 1.0e-9:
-                z_reference = self._body_axis_to_inertial(self.adcs.current_quaternion, "+Z")
-            predicted_quaternion = self.build_frame(
-                "+Y",
-                predicted_los,
-                "+Z",
-                z_reference,
-                context="RELAY predictive slew target",
-            )
-            target_command = AttitudeCommand(
-                quaternion=predicted_quaternion,
-                primary_objective="+Y -> predicted GS LOS at slew completion",
-                secondary_objective="+Z -> orbit-normal projection about +Y",
-                active_attitude_target="RELAY_INERTIAL_HOLD",
-                attitude_hold_reason="Predictive slew to GS position at slew completion",
-                relay_axis_label="+Y",
-            )
-            angle_deg, duration_sec = self._calculate_slew_duration_sec(target_command.quaternion)
-        else:
-            target_command = self._get_attitude_command(target_mode, orbit_state, sun_visible, battery_wh, gs_visible)
-            angle_deg, duration_sec = self._calculate_slew_duration_sec(target_command.quaternion)
+        target_command = self._get_attitude_command(target_mode, orbit_state, sun_visible, battery_wh, gs_visible)
+        angle_deg, duration_sec = self._calculate_slew_duration_sec(target_command.quaternion)
 
         self.target_mode = target_mode
         self.slew_start_time_sec = time_sec
+        self._relay_tracking_valid_sec = 0.0
         self.slew_end_time_sec = time_sec + duration_sec
         self.fsm.target_mode = target_mode
         self.fsm.slew_start_time_sec = time_sec
@@ -3990,6 +4007,16 @@ class ANTARAScienceSimulator:
 
         if self.fsm.current_mode != "SLEWING":
             return False
+        if self.adcs.saturation_hold_active or self.adcs.is_slewing or self.adcs.settling:
+            return False
+        if self.current_attitude_command is not None:
+            pending_error, _ = self.adcs.compute_slew(
+                self.adcs.current_quaternion, self.current_attitude_command.quaternion)
+            if pending_error > self.config.pointing_accuracy_deg:
+                return False
+        actual_error, _ = self.adcs.compute_slew(self.adcs.current_quaternion, self.adcs.target_quaternion)
+        if actual_error > self.config.pointing_accuracy_deg:
+            return False
         target_mode = self.target_mode
         if target_mode not in self.fsm.ALLOWED_TRANSITIONS["SLEWING"]:
             target_mode = "SUN_POINTING"
@@ -4000,7 +4027,10 @@ class ANTARAScienceSimulator:
         if self.active_slew_event_index is not None:
             self.logger.finalize_slew_event(self.active_slew_event_index, time_sec)
             self.active_slew_event_index = None
-        return self.fsm.transition(target_mode, f"Slew complete -> {target_mode}")
+        transitioned = self.fsm.transition(target_mode, f"Slew complete -> {target_mode}")
+        if transitioned:
+            self._steps_since_mode_transition = 0
+        return transitioned
 
     def _begin_detumble_phase(self, time_sec: float) -> None:
         """Start the startup detumble log when the spacecraft first enters DETUMBLE."""
@@ -4859,17 +4889,16 @@ class ANTARAScienceSimulator:
         illumination_fraction = 1.0
         current_mode = self.fsm.current_mode
         while time_sec <= final_time_sec:
-            # --- Multi-rate stepping (Stage 1.3) ---
-            # Use fine step during SLEWING, DETECTION, RELAY, or near eclipse transitions
-            fine_modes = {"SLEWING", "DETECTION", "RELAY"}
-            near_eclipse_edge = abs(illumination_fraction - prev_illumination_fraction) > 0.1
-            if current_mode in fine_modes or near_eclipse_edge:
-                effective_step_sec = step_sec
-            else:
-                effective_step_sec = coarse_step_sec
-
-            n_substeps = max(1, int(round(effective_step_sec / step_sec)))
-            sub_step_sec = effective_step_sec / n_substeps
+            # One elapsed interval for every subsystem. Startup and active
+            # tracking require the fine cadence, including detumble physics.
+            current_mode = self.fsm.current_mode
+            fine_modes = {"COLD_AND_DARK", "DETUMBLE", "SLEWING", "DETECTION", "RELAY"}
+            near_eclipse_edge = time_sec - self.illumination_transition_start_time_sec <= self.config.penumbra_transition_sec
+            step_sec = self.config.step_sec if (
+                current_mode in fine_modes or near_eclipse_edge or self.adcs.saturation_hold_active
+            ) else coarse_step_sec
+            if time_sec < final_time_sec:
+                step_sec = min(step_sec, final_time_sec - time_sec)
 
             self.fsm.set_time(time_sec)
             self.adcs.set_time(time_sec)
@@ -4988,6 +5017,7 @@ class ANTARAScienceSimulator:
                 and inside_saa
                 and payload_pointing_valid
                 and payload_settled
+                and not self.adcs.saturation_hold_active
                 and storage_not_full
                 and self.payload.is_operable(self.eps.battery_wh, current_mode)
             ):
@@ -5030,6 +5060,7 @@ class ANTARAScienceSimulator:
                 current_mode == "RELAY"
                 and gs_visible
                 and relay_settled
+                and not self.adcs.saturation_hold_active
                 and self.science_storage_mb > 0.0
                 and relay_pointing_valid
                 and gs_off_boresight_deg <= self.config.directional_antenna_half_beamwidth_deg
@@ -5379,36 +5410,9 @@ class ANTARAScienceSimulator:
                 self.logger.flush_telemetry()
                 next_flush_sec += flush_interval_sec
 
-            # Multi-rate stepping: use coarse step for most modes, fine step for
-            # SLEWING/DETECTION/RELAY and near eclipse transitions
-            fine_step = step_sec
-            # Check if we're near an eclipse transition (within penumbra_transition_sec)
-            near_eclipse_edge = (
-                self.previous_sun_visible_geometry != sun_visible
-                or (time_sec < self.config.penumbra_transition_sec and time_sec > 0)
-            )
-            # Use fine step for active modes or near eclipse boundaries
-            use_fine_step = (
-                current_mode in {"SLEWING", "DETECTION", "RELAY"}
-                or near_eclipse_edge
-                or self.adcs.saturation_hold_active
-            )
-            effective_step = fine_step if use_fine_step else coarse_step_sec
-
-            # Advance time
-            time_sec += effective_step
+            # EPS, ADCS, payload and mode accounting already advanced once.
+            time_sec += step_sec
             self.time_sec = time_sec
-
-            # If using coarse step, sub-step EPS and other fast models at fine step
-            if effective_step > fine_step:
-                n_sub = max(1, int(round(effective_step / fine_step)))
-                sub_dt = effective_step / n_sub
-                for _ in range(n_sub):
-                    self.eps.step(sub_dt)
-                    # Sub-step ADCS wheel momentum if not in detumble
-                    if current_mode != "DETUMBLE" and not self.adcs.detumble_complete:
-                        # Approximate: update wheel momentum at sub-step resolution
-                        pass
 
         if self.payload._current_pass_records:
             if self.saa.current_pass is not None:

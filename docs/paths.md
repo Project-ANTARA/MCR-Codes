@@ -1,7 +1,9 @@
 # paths.py
 
 ## File Overview
-Central path management and Orekit data initialization utility for the ANTARA mission analysis project. All simulation scripts route file I/O through this module to maintain consistent output locations and handle Orekit data setup.
+Central path management and Orekit data initialization utility for the ANTARA mission analysis project. Most simulation entrypoints route outputs through this module. The detumble runner instead uses its explicit `--output` path, and its analysis uses `--output-dir`; those paths are relative to the working directory unless absolute.
+
+Reviewed 2026-09-12 against [source](../src/paths.py). Helpers create directories but do not version or back up files. Preserve existing outputs before reusing a filename/tag. See [detumble paths](leop_detumble_mc.md) and [scenario comparison layout limitations](scenarios.md).
 
 ## Dependencies
 - **Standard Library**: `pathlib.Path`, `os`
@@ -56,11 +58,11 @@ Initializes Orekit data directory for the Orekit VM.
 - **Params**: `download_if_missing` - If True, downloads Orekit data automatically
 - **Returns**: `Path` to the Orekit data directory that was used
 - **Behavior**:
-  1. Checks for existing data at `data/orekit/orekit-data/orekit-data-main` or `data/orekit-data.zip`
+  1. Checks repository-root `orekit-data/orekit-data-main` and then `orekit-data.zip`
   2. If found, calls `setup_orekit_curdir()` and returns the path
   3. If not found and `download_if_missing=True`: changes to `DATA_DIR`, downloads data via `download_orekit_data_curdir()`, sets up Orekit, returns zip path
   4. If not found and `download_if_missing=False`: raises `FileNotFoundError`
-- **Side effects**: Calls Orekit's `setup_orekit_curdir()`; may download ~500MB data on first run
+- **Side effects**: Calls Orekit's `setup_orekit_curdir()`; downloads only when explicitly requested and no candidate is found
 
 ## Internal Logic
 - Uses `Path.resolve()` for absolute, symlink-resolved paths
@@ -70,10 +72,12 @@ Initializes Orekit data directory for the Orekit VM.
 
 ## Usage Example
 ```python
+import orekit
+orekit.initVM()
 from paths import init_orekit_data, results_path, figures_path
 
-# Must call before any Orekit imports in scripts
-init_orekit_data(download_if_missing=True)
+# Prepare root-level Orekit data before this default call
+init_orekit_data()
 
 # Writing simulation outputs
 output_csv = results_path("mcr", "power_analysis.csv")
@@ -83,6 +87,7 @@ plot_png = figures_path("thermal", "temperature_profile.png")
 ```
 
 ## Notes / TODOs
-- **Orekit data location**: Expects data at `data/orekit/orekit-data/orekit-data-main/` (extracted) or `data/orekit-data.zip`. The zip is auto-downloaded if `download_if_missing=True`.
+- **Orekit data location**: Searches repository-root `orekit-data/orekit-data-main/` or `orekit-data.zip`. Science uses the default call, which does not auto-download.
+- **Download/search mismatch**: `download_if_missing=True` downloads to `data/orekit-data.zip` and loads it for that invocation, but later default calls do not search there. The current missing-data exception also lists stale `data/` paths. Prepare root-level data with `download_orekit_data_curdir()` from the repository root, as shown in the [setup guide](../README.md#orekit-data). This documentation describes the current implementation; no path code was changed.
 - **Thread safety**: `init_orekit_data()` changes global CWD temporarily — not thread-safe if called concurrently.
 - **Gitignore**: `results/` and `figures/` are gitignored; `data/orekit/` and `data/orekit-data.zip` are also gitignored per `.gitignore`.

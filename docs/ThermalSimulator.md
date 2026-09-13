@@ -1,5 +1,11 @@
 # ThermalSimulator.py
 
+## Current scope (2026-09-12)
+
+Source: [ThermalSimulator.py](../src/ThermalSimulator.py). Thermal has its own `ThermalMissionConfig`, attitude generation, and synthetic power schedule. It does not consume Science's saturation/SAFE telemetry automatically. Its CLI is independent: use its documented thermal options, not Science scenario or detumble progress switches. Use distinct output copies for HOT/COLD studies because default filenames are shared.
+
+Setup and navigation: [repository README](../README.md) · [documentation index](README.md). Supporting study results were not rerun as part of this documentation review.
+
 ## File Overview
 Lumped-capacitance thermal simulator for the ANTARA 3U CubeSat. Propagates orbit with Orekit (numerical, Dormand-Prince 8/5/3) and integrates a 7-node thermal network (6 faces + 1 internal bus) using RK4 with configurable sub-steps. Supports bounding-case analysis (HOT/COLD/NOMINAL), beta-angle targeting via RAAN search, latitude-dependent Earth albedo/IR, solar-cell electrical conversion derating, face-to-face conduction, and tumbling attitude worst-case. Produces telemetry CSV, worst-case summary CSV, and 4-panel plot suite.
 

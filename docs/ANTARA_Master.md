@@ -1,5 +1,11 @@
 # ANTARA_Master.py
 
+## Current scope (2026-09-12)
+
+Source: [ANTARA_Master.py](../src/ANTARA_Master.py). This is an independent 12-hour simulator with local config, ADCS, EPS, and FSM definitions. Science's 60-hour recovery verification does not validate Master, and its main loop still comments out `_validate_attitude_metrics()`. Use the [Science guide](ANTARA_Science_Sim.md) for current scenario/recovery behavior; do not infer parity from similar class names.
+
+Setup and navigation: [repository README](../README.md) · [documentation index](README.md). Supporting study results were not rerun as part of this documentation review.
+
 ## File Overview
 High-fidelity simulation entry point for the ANTARA 3U CubeSat mission. Implements a full numerical propagation loop with Orekit (Dormand-Prince 8/5/3 integrator), a 7-state spacecraft FSM (COLD_AND_DARK, DETUMBLE, SAFE, SLEWING, SUN_POINTING, DETECTION, RELAY), detailed ADCS model with reaction wheels and magnetorquers, EPS model with battery taper charging, SAA polygon detection, ground station elevation-based visibility, science payload data generation, and communications downlink. Produces comprehensive telemetry CSVs and a 9-panel PDR plot suite.
 
@@ -47,7 +53,7 @@ Key groups:
 - **Timing/Hysteresis**: 50+ parameters for startup, detumble, slew, saturation, dwell times, deadbands
 - **B-field**: `earth_b_field_model="dipole"`, `magnetorquer_dipole_Am2=0.2`, `earth_B_field_T=30.0e-6`
 - **Integrator**: `min_integrator_step_sec=0.1`, `max_integrator_step_sec=120.0`, position/velocity tolerances
-- **Validation**: `__post_init__` enforces eccentricity/RAAN/inclination bounds, EPS threshold ordering, tip-off rate sanity
+- **Configuration scope**: This local dataclass is not the validated shared Science `MissionConfig`; inspect its own consumers rather than assuming shared validation hooks apply
 
 #### `OrbitState` (dataclass)
 Container for propagated state per timestep.
@@ -215,7 +221,7 @@ Output: `results/master/` CSVs + `figures/master/ANTARA_7day_PDR_simulation.png`
 ## Notes / TODOs
 - **Runtime**: ~minutes for 12h @ 2s step; monitor disk for telemetry CSV size (~21,600 rows × 80 cols)
 - **Plotting dependencies**: `matplotlib` + `cartopy` required for plots; guarded by try/except in Science_Sim but Master imports directly
-- **Orekit VM**: `orekit.initVM()` called in `_init_orekit()` and also at module top-level (line 12) — harmless but redundant
+- **Orekit VM**: `_init_orekit()` calls `orekit.initVM()`; `import orekit` alone is not a second JVM initialization
 - **Atmosphere fallback**: Tries NRLMSISE-00 (CSSI space weather) → DTM2000 (Marshall solar activity) → raises RuntimeError
 - **SAFE mode behavior**: Freezes current inertial attitude (no slew to nadir) to avoid wheel saturation from repeated large slews
 - **SUN_POINTING misnomer**: Despite name, does NOT track Sun — holds fixed RAM/nadir/orbit-normal inertial attitude; submodes (CHARGING/PASSIVE/ECLIPSE) are power-state labels only

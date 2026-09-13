@@ -1,5 +1,11 @@
 # ANTARA_MCR.py
 
+## Current scope (2026-09-12)
+
+Source: [ANTARA_MCR.py](../src/ANTARA_MCR.py). This is the annual RAAN trade campaign, not the lightweight detumble Monte Carlo. It uses its own module constants, propagation, power calculations, and global-step ETA. The detumble runner's `--workers`, `--no-progress`, and pickle format do not apply here. Preserve existing `results/mcr/` outputs before running this expensive campaign.
+
+Setup and navigation: [repository README](../README.md) · [documentation index](README.md). Supporting study results were not rerun as part of this documentation review.
+
 ## File Overview
 Monte Carlo RAAN trade study for the ANTARA mission. Runs 365-day numerical propagation for 7 RAAN values (0°–180° in 30° steps) × 2 Monte Carlo runs each, with randomized altitude, drag coefficient, SRP coefficient, battery efficiency, and solar tracking error. Produces 7 output CSVs covering power, battery, CONOPS, orbit classification, drag lifetime, and a master trade matrix, plus statistical summaries with 99% confidence intervals.
 
@@ -10,7 +16,7 @@ Monte Carlo RAAN trade study for the ANTARA mission. Runs 365-day numerical prop
 - **Orekit/Java Modules**: `AbsoluteDate`, `TimeScalesFactory`, `FramesFactory`, `KeplerianOrbit`, `PositionAngleType`, `Constants`, `IERSConventions`, `OneAxisEllipsoid`, `CelestialBodyFactory`, `NadirPointing`, `NumericalPropagator`, `HolmesFeatherstoneAttractionModel`, `ThirdBodyAttraction`, `GravityFieldFactory`, `DragForce`, `IsotropicDrag`, `DTM2000`, `CssiSpaceWeatherData`, `SolarRadiationPressure`, `IsotropicRadiationSingleCoefficient`, `EclipseDetector`, `SpacecraftState`, `Vector3D`, `DormandPrince853Integrator`
 
 ## Exports / Public API
-This script has no exported functions/classes — it runs as a standalone Monte Carlo campaign when executed.
+The script defines the helpers below and executes its campaign at module scope; importing it is not a lightweight API check.
 
 ### Configuration Constants (Module-Level)
 | Constant | Value | Description |

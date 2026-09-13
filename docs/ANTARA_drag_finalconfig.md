@@ -1,7 +1,13 @@
 # ANTARA_drag_finalconfig.py
 
+## Current scope (2026-09-12)
+
+Source: [ANTARA_drag_finalconfig.py](../src/ANTARA_drag_finalconfig.py). This standalone lifetime study has separate mass, area, atmosphere, and integration settings. The RK4 integration step is 60 seconds; the outer loop samples altitude once per day. Its 450 km stop is a study cutoff, not a simulation of atmospheric reentry. This documentation review does not validate the numerical lifetime estimates.
+
+Setup and navigation: [repository README](../README.md) · [documentation index](README.md). Supporting study results were not rerun as part of this documentation review.
+
 ## File Overview
-Orbital lifetime analysis for the ANTARA 3U CubeSat final configuration. Computes drag-limited lifetime vs. initial altitude (500–600 km) for the "1 fixed + 2 deployed" solar array configuration (0.076799 m²) under solar maximum conditions with tumbling-averaged cross-section. Uses Orekit numerical propagation with DTM2000 atmosphere (solar max epoch) and RK4 integration at 1-day steps.
+Orbital lifetime analysis for the ANTARA 3U CubeSat final configuration. Computes time to the 450 km study cutoff vs. initial altitude (500–600 km) for the "1 fixed + 2 deployed" configuration (0.076799 m²), using DTM2000 atmosphere and an area multiplier. Orekit integrates with a 60-second RK4 step; the script checks altitude at daily output epochs.
 
 ## Dependencies
 - **Standard Library**: `math`
@@ -19,7 +25,7 @@ Orbital lifetime analysis for the ANTARA 3U CubeSat final configuration. Compute
 | `MASS` | 4.0 kg | Spacecraft mass |
 | `CD` | 2.2 | Drag coefficient |
 | `TUMBLING_FACTOR` | 1.5 | Tumbling-averaged area multiplier |
-| `END_ALT` | 450000.0 m | Reentry termination altitude |
+| `END_ALT` | 450000.0 m | Study cutoff altitude, not physical reentry |
 | `areas` | `{"1 fixed + 2 deployed": 0.076799}` | Configuration cross-sections |
 
 ### Functions
@@ -31,7 +37,7 @@ Computes orbital lifetime (seconds) for given cross-section and initial altitude
 - **Atmosphere**: DTM2000 with CSSI space weather (solar max at epoch)
 - **Drag**: `A_eff = TUMBLING_FACTOR × area`, `CD = 2.2`
 - **Gravity**: 2×0 zonal harmonics only
-- **Integrator**: Classical RK4, fixed 86400s (1 day) step
+- **Integrator**: Classical RK4, fixed 60s step; altitude checked every 86400s
 - **Termination**: Altitude < 450 km or 30-year cap
 - **Returns**: Duration in seconds from start date
 
@@ -47,13 +53,13 @@ for altitude_km in range(500, 601, 10):
 ### Lifetime Calculation
 1. Initialize orbit at `start_alt_m` with solar max epoch (2000-01-01)
 2. Build propagator with drag (tumbling-averaged area) + 2×0 gravity
-3. Propagate in 1-day steps using RK4
+3. Request daily output states from the 60-second-step RK4 propagator
 4. Check altitude after each step
 5. Return elapsed time when altitude < 450 km
 6. Cap at 30 years (10,950 days)
 
 ### Tumbling Factor
-`TUMBLING_FACTOR = 1.5` multiplies the geometric cross-section to approximate worst-case tumbling drag (average projected area over random tumble). For a 3U CubeSat, this represents the effective area seen by the flow during uncontrolled rotation.
+`TUMBLING_FACTOR = 1.5` multiplies the supplied area. It is a modeling assumption in this study, not a resolved attitude history or a calibrated projected-area average.
 
 ## Usage Example
 ```bash
@@ -65,7 +71,7 @@ Output: Console table of Altitude (km) vs Lifetime (years) for the single config
 ## Notes / TODOs
 - **Solar max epoch**: Uses year 2000 (Cycle 23 peak) as proxy — not Cycle 25 actual peak (~2024-2025)
 - **Single configuration**: Only "1 fixed + 2 deployed" area tested
-- **RK4 integrator**: Fixed 1-day step — coarse but fast for lifetime trends
+- **Sampling**: The daily altitude check can locate the cutoff only to approximately a day; the integration step is 60 seconds
 - **2×0 gravity**: Only J2 zonal harmonic — no tesseral, no 3-body, no SRP
 - **No attitude model**: Tumbling factor approximates attitude-averaged drag
 - **CSSI space weather**: Uses default supported names (F10.7/Ap proxies for year 2000)

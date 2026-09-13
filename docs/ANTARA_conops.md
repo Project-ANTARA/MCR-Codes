@@ -1,5 +1,11 @@
 # ANTARA_conops.py
 
+## Current scope (2026-09-12)
+
+Source: [ANTARA_conops.py](../src/ANTARA_conops.py). This script executes its analytical timeline at module scope; importing it can start a run and write output. Run it from the repository root after the [Orekit setup](../README.md#orekit-data). It uses bounding-box visibility rather than Science's full attitude/recovery logic, so successful CONOPS execution is only a basic environment check.
+
+Setup and navigation: [repository README](../README.md) · [documentation index](README.md). Supporting study results were not rerun as part of this documentation review.
+
 ## File Overview
 Fast analytical propagation script for CONOPS (Concept of Operations) timeline generation. Uses Orekit's Eckstein-Hechler analytical propagator (J2-perturbed) to simulate 30 days of orbit at 60-second steps, producing a CSV log of orbital position, eclipse status, SAA crossings, and ground station visibility. This is the quickest simulation entry point for verification.
 
@@ -10,7 +16,7 @@ Fast analytical propagation script for CONOPS (Concept of Operations) timeline g
 - **Orekit Modules**: `FramesFactory`, `OneAxisEllipsoid`, `CelestialBodyFactory`, `AbsoluteDate`, `TimeScalesFactory`, `KeplerianOrbit`, `PositionAngleType`, `Constants`, `IERSConventions`, `EcksteinHechlerPropagator`, `EclipseDetector`
 
 ## Exports / Public API
-This script has no exported functions/classes — it runs as a standalone simulation when executed.
+The script defines the helpers below and runs its simulation at module scope; it is not a side-effect-free library import.
 
 ### Configuration Constants (Module-Level)
 | Constant | Value | Description |

@@ -189,7 +189,7 @@ jobs:
           python -m pytest tests/test_fsm_spec_matches_code.py -v --tb=short
 
       - name: Physics and attitude regression tests
-        run: python -m pytest tests/test_physics_attitude.py -v --tb=short
+        run: python -m pytest tests/test_physics_attitude.py tests/test_detumble_multiprocessing.py -v --tb=short
 
       - name: Syntax check validation tests
         run: |

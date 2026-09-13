@@ -1169,6 +1169,7 @@ class ADCSModel:
             self.attitude_error_deg, _ = self.compute_slew(self.current_quaternion, self.target_quaternion)
             return False
 
+        continuing_slew = self.is_slewing and self.last_commanded_mode == mode
         self.target_quaternion = target_quaternion
         self.last_commanded_mode = mode
         self.last_command_reason = reason
@@ -1179,7 +1180,8 @@ class ADCSModel:
         self.is_slewing = self.slew_angle_deg > self.config.pointing_accuracy_deg
         self.settling = False
         self.settling_time_remaining_sec = 0.0
-        self.current_slew_rate_deg_sec = 0.0
+        if not continuing_slew:
+            self.current_slew_rate_deg_sec = 0.0
         return self.is_slewing
 
     def advance(self, dt_sec: float) -> None:

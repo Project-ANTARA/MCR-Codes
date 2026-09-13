@@ -2,6 +2,14 @@
 
 This workspace contains the ANTARA 3U CubeSat mission simulation codebase, organized for active development, validation, and analysis.
 
+## Current status
+
+Documentation reviewed against the working tree on 2026-09-12. Science's annual preset has been verified through **60 hours**, not a full year: 17,758 telemetry rows, successful saturation → SAFE → SUN_POINTING recovery, and a maximum settled, non-held SUN_POINTING error of 4.999973° against the unchanged 5° limit. See the [runtime repair evidence](docs/SIMULATION_RUNTIME_FIX_REPORT.md).
+
+The latest combined physics/attitude, detumble multiprocessing/progress, and shared FSM regression command passed **31 tests** locally. Historical subsystem reports retain their own results and are not superseded by that count.
+
+Start with the [documentation index](docs/README.md), [Science guide](docs/ANTARA_Science_Sim.md), and [detumble Monte Carlo guide](docs/leop_detumble_mc.md). Local test results do not certify all subsystem physics or a hosted CI run. Live AP9 remains unavailable through the current interface.
+
 ## Layout
 
 ```
@@ -12,9 +20,9 @@ figures/      Generated plots and images (gitignored)
 notebooks/    Jupyter analysis notebooks
 archive/      Legacy code variants (MATLAB, old power models)
 tmp/          Scratch space
-docs/         Generated documentation (FSM diagrams, VALIDATION_REPORT.md)
+docs/         Module guides and generated FSM diagrams
 tests/        Unit and validation tests
-scripts/      Utility scripts (validation report generator)
+scripts/      Backend verification and validation report generator
 .github/      CI/CD workflows
 ```
 
@@ -22,12 +30,15 @@ scripts/      Utility scripts (validation report generator)
 
 ### Prerequisites
 - **Java 11+** (required for Orekit JVM)
-- **Python 3.11+**
-- **Orekit data** (auto-downloaded on first run, or place at `data/orekit-data.zip`)
+- **Python 3.11 in CI**; local physics fixes were verified with Python 3.10.21
+- **Orekit data** at a repository-root location listed below; prepare it before simulation
 
 ```bash
-# Install Python dependencies
-pip install orekit numpy pandas matplotlib cartopy shapely scipy skyfield pytest
+# Use the local environment containing Orekit; Micromamba is not required locally
+conda activate orekit_env
+conda install -c conda-forge orekit numpy pandas matplotlib cartopy shapely scipy skyfield pytest pip ppigrf=2.1.0
+python -m pip install spacepy==0.7.0 graphviz
+python scripts/verify_physics_dependencies.py
 ```
 
 ### Fast Verification (seconds)
@@ -35,8 +46,8 @@ pip install orekit numpy pandas matplotlib cartopy shapely scipy skyfield pytest
 # Fast CONOPS timeline (analytical propagation)
 python src/ANTARA_conops.py
 
-# Syntax/import check all modules
-python -c "
+# Import check for the two main simulators
+PYTHONPATH=src python -c "
 import orekit; orekit.initVM()
 from ANTARA_Science_Sim import MissionConfig, ANTARAScienceSimulator
 from ANTARA_Master import MissionConfig, ANTARASimulator
@@ -78,9 +89,23 @@ python src/ANTARA_Science_Sim.py --scenario leop_1yr
 # Override coarse step for leop_1yr
 python src/ANTARA_Science_Sim.py --scenario leop_1yr --coarse-step-sec 30.0
 
-# Disable plotting (faster, no matplotlib/cartopy needed)
+# Disable plot generation
 python src/ANTARA_Science_Sim.py --scenario leop_24h --no-plots
+
+# CI-equivalent one-hour runs with fixed two-second steps
+python src/ANTARA_Science_Sim.py --scenario leop_24h --duration-hours 1 --step-sec 2 --no-plots
+python src/ANTARA_Science_Sim.py --scenario no_leop_24h --duration-hours 1 --step-sec 2 --no-plots
 ```
+
+Explicit CLI values override scenario presets, which override global defaults. An explicit `--step-sec` also sets the coarse step unless `--coarse-step-sec` is supplied separately. Preset-only runs retain multirate stepping. `--no-plots`, RNG, and periphery-merge controls also apply with scenarios.
+
+The verified one-hour runs each produce 1,801 telemetry rows (both endpoints included), spanning `time_sec=0` to `3600` with two-second gaps. Reusing an output tag replaces that scenario's outputs; preserve earlier results before rerunning.
+
+### Physics backends and limitations
+
+The simulator imports **`ppigrf==2.1.0`**, not `pyIGRF`. Its IGRF-14 backend takes altitude in kilometers and returns East/North/Up in nT; ANTARA converts to North/East/Down in Tesla. Missing ppigrf selects a dipole fallback with a warning.
+
+**SpacePy 0.7.0 / IRBEM does not enable live AP9.** The current AP9 query uses an unsupported interface and retains the configured flux baseline, warning once when queried. `get_AEP8` supplies AE8/AP8; the verification script exercises AP8 only. This baseline feeds the primary proton-flux calculation, so it is not merely a plotting limitation. Keep Orekit, ppigrf, and SpacePy in the same environment; do not install physics packages only into base Conda or with `--user`.
 
 ### Outputs
 Each scenario writes to `results/science/<tag>_*.csv` and `figures/science/<tag>_*.png`:
@@ -99,9 +124,13 @@ Each scenario writes to `results/science/<tag>_*.csv` and `figures/science/<tag>
 
 Capability envelope analysis for tip-off rate/acceleration combinations.
 
+Process-pool tasks use a module-level worker with explicit configuration and timestep arguments, including on spawn-based platforms. Results retain seeded trial order across serial and parallel runs; the requested count includes the baseline trial. Use `--workers` to bound local CPU usage. See [runtime repair verification](docs/SIMULATION_RUNTIME_FIX_REPORT.md).
+
+The terminal progress bar shows completed/total trials, successes, timeouts, rate-cap hits, elapsed wall time, and an approximate ETA based on completed random trials. Baseline and serial execution also report simulated seconds, detumble phase, and body-rate magnitude. Parallel progress is reported only by the parent process. Redirected output uses occasional plain-text lines on stderr; `--no-progress` hides the display but retains setup information and the final summary. A timeout is a trial outcome, not a worker error; worker exceptions still stop the run.
+
 ```bash
-# Run Monte Carlo (2000 trials default, parallelized)
-python src/leop_detumble_mc.py --n-trials 2000 --output detumble_mc_results.pkl
+# Run Monte Carlo with progress (count includes baseline; use a new output path)
+python src/leop_detumble_mc.py --n-trials 5000 --workers 4 --output detumble_mc_results.pkl
 
 # Analyze results (heatmaps, contours, per-axis breakdown)
 python src/analyze_detumble_mc.py detumble_mc_results.pkl --output-dir detumble_analysis
@@ -120,7 +149,7 @@ python src/analyze_detumble_mc.py detumble_mc_results.pkl --output-dir detumble_
 
 ## FSM Decision Specification & Diagrams (Stage 3)
 
-The FSM logic is documented in `src/fsm_spec.py` with exact branch ordering matching `SpacecraftFSM.evaluate()`.
+`src/fsm_spec.py` describes the **shared** FSM in `src/antara_models.py`. Science defines a separate local FSM, including saturation-hold priority during SLEWING; the shared drift guard and generated diagrams do not certify that local implementation. Its recovery path has separate runtime regressions.
 
 ### Generate Diagrams
 
@@ -140,13 +169,16 @@ Ensures code matches spec:
 
 ```bash
 python -m pytest tests/test_fsm_spec_matches_code.py -v
+PYTHONPATH=src python -m pytest tests/test_physics_attitude.py tests/test_detumble_multiprocessing.py -v
 ```
+
+The regressions cover startup geometry, negative alignments, IGRF units, CLI precedence, multirate accounting, saturation recovery, spawn-safe Monte Carlo serialization, and terminal progress. Numerical alignment uses normalized cross/dot `atan2` with unchanged `1e-6°` startup tolerance; this is not a flight pointing requirement. The [dependency repair report](OPENCODE_PHYSICS_ATTITUDE_FIX_REPORT.md) retains its earlier 14-test evidence; [runtime verification](docs/SIMULATION_RUNTIME_FIX_REPORT.md) records subsequent checks.
 
 ---
 
 ## Subsystem Validation (Stage 4)
 
-Six validation tests against real-world references:
+Six standalone subsystem checks against the reference values and heuristics embedded in their source. These are separate from the targeted regression suite; a passing baseline-flux comparison is not live AP9 validation:
 
 | Test | Subsystem | Reference | Tolerance |
 |------|-----------|-----------|-----------|
@@ -179,7 +211,7 @@ python scripts/generate_validation_report.py
 | `ANTARA_MCR.py` | Monte Carlo RAAN trade (365 days × 7 RAANs) |
 | `ANTARA_avg.py` | Battery sizing MC (365 days × 3 runs) |
 | `ANTARA_conops.py` | Fast CONOPS (30 days, analytical) |
-| `ANTARA_FINAL_POWERGEN.py` | RAAN power optimization (24h × 24 RAANs) |
+| `ANTARA_FINAL_POWERGEN.py` | RAAN power optimization (24h × 25 samples, including equivalent 0°/360° endpoints) |
 | `ANTARA_drag_finalconfig.py` | Lifetime sweep (500-600km, final config) |
 | `ANTARA_drag_study.py` | Lifetime trade (4 configs) |
 | `TradeCase.py` | Analytical battery DoD/cycle life |
@@ -194,11 +226,13 @@ python scripts/generate_validation_report.py
 | Workflow | Trigger | Purpose |
 |----------|---------|---------|
 | **Smoke Tests** | Every push/PR | Syntax, imports, basic imports |
-| **Unit Tests** | Every push/PR | FSM drift guard, syntax checks |
-| **Scenario Smoke** | Every push/PR | 1-hour sim for leop_24h, no_leop_24h |
+| **Unit Tests** | Every push/PR | Shared FSM drift guard, physics/attitude and detumble multiprocessing/progress regressions |
+| **Scenario Smoke** | Every push/PR | Both scenarios: 1 hour, fixed 2-second steps, telemetry bounds checked |
 | **FSM Diagram** | Every push/PR | Generates PNG/SVG/Mermaid diagrams |
 | **Nightly Full** | Daily 2 AM UTC | Full scenarios, MC (5000 trials), validation |
 | **Weekly Validation** | Sundays 3 AM | Full validation suite + report |
+
+All five Orekit jobs use Micromamba environment `antara`, conda-forge `ppigrf=2.1.0`, and activated `python -m pip install spacepy==0.7.0`. Backend verification checks `/micromamba/envs/antara/` in the interpreter path and executes real IGRF/IRBEM queries. These workflow changes were checked locally; the repair report does not claim a hosted CI run.
 
 ### Artifacts (retained 30-90 days)
 - `fsm-diagrams` - FSM diagrams (PNG/SVG/Mermaid)
@@ -211,26 +245,23 @@ python scripts/generate_validation_report.py
 
 ## Orekit Data
 
-Orekit requires ephemeris/atmosphere data. The simulator auto-downloads on first run:
+Orekit requires ephemeris/atmosphere data. Run this from the repository root to prepare the root-level archive used by CI and local simulations:
 
 ```bash
-# Auto-download (first run)
-python src/ANTARA_Science_Sim.py --duration-hours 0.1
-
-# Or manual download
-wget -O data/orekit-data.zip "https://gitlab.orekit.org/orekit/orekit-data/-/archive/master/orekit-data-master.zip"
-unzip data/orekit-data.zip -d data/
+python -c 'import orekit; orekit.initVM(); from orekit.pyhelpers import download_orekit_data_curdir; download_orekit_data_curdir()'
 ```
 
 Expected locations (auto-detected):
-- `data/orekit/orekit-data/orekit-data-main/` (extracted)
-- `data/orekit-data.zip` (zip)
+- `orekit-data/orekit-data-main/` (extracted, repository root)
+- `orekit-data.zip` (repository root)
+
+`src/paths.py` currently searches only these two locations. Its optional `download_if_missing=True` branch writes to `data/orekit-data.zip` for that invocation, but subsequent default calls do not search that location. Science calls the default initializer and therefore needs data prepared beforehand. See [path behavior](docs/paths.md).
 
 ---
 
 ## Configuration
 
-All numeric parameters live in `MissionConfig` dataclasses (one per script). Key knobs:
+Science's `MissionConfig` lives in `src/antara_models.py`; standalone studies define their own configurations. Edit the defining module, not a re-export. Science also retains local `EPSModel` and `SpacecraftFSM` definitions that shadow its shared imports; inspect the actual consumer before synchronizing changes. Key knobs:
 
 ```python
 # Orbit
@@ -253,7 +284,7 @@ downlink_rate_mbps = 0.0192  # 19.2 kbps
 gs_elevation_mask_deg = 15.0
 
 # Multi-rate (leop_1yr)
-coarse_step_sec = 20.0  # used when not in SLEWING/DETECTION/RELAY
+coarse_step_sec = 20.0  # outside startup, active modes, eclipse edges, saturation holds
 ```
 
 ---
@@ -293,6 +324,8 @@ ANTARA_CODES-main/
 │   └── antara_models.py           # Orekit-free shared models
 ├── tests/
 │   ├── test_fsm_spec_matches_code.py
+│   ├── test_physics_attitude.py
+│   ├── test_detumble_multiprocessing.py
 │   └── validation/
 │       ├── test_orbit_propagation.py
 │       ├── test_igrf_field.py
@@ -301,9 +334,10 @@ ANTARA_CODES-main/
 │       ├── test_saa_flux_model.py
 │       └── test_comms_link_budget.py
 ├── scripts/
+│   ├── verify_physics_dependencies.py
 │   └── generate_validation_report.py
 ├── .github/workflows/ci.yml
-├── docs/                          # Generated (FSM diagrams, etc.)
+├── docs/                          # Maintained guides and generated FSM diagrams
 ├── results/                       # Generated (gitignored)
 ├── figures/                       # Generated (gitignored)
 ├── data/                          # Orekit data (gitignored)
@@ -317,11 +351,11 @@ ANTARA_CODES-main/
 ## Contributing
 
 1. All numeric constants in `MissionConfig` - no magic numbers
-2. `orekit.initVM()` must be first call in every script
+2. Initialize the Orekit JVM before using Java-backed APIs; preserve each entrypoint's initialization order
 3. Quaternion convention: scalar-first [w,x,y,z], body-to-inertial
 4. Body frame (ICD Rev B): +X=RAM/payload, +Y=nadir/relay, +Z=sun-panel
 5. Run `python -m py_compile src/*.py` before committing
 
 ---
 
-*See `docs/fsm_diagram.mmd` for FSM state machine, `VALIDATION_REPORT.md` for validation status.*
+See [module documentation](docs/README.md), [contributor instructions](AGENTS.md), and the [physics/attitude repair report](OPENCODE_PHYSICS_ATTITUDE_FIX_REPORT.md). `VALIDATION_REPORT.md` is a dated captured run, not proof that the current revision passes every subsystem validation.

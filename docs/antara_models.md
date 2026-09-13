@@ -5,6 +5,8 @@
 
 **Key design goal**: Enable `leop_detumble_mc.py` (and validation tests) to run thousands of parallel trials without paying the Orekit import/JVM-init cost per worker process.
 
+Reviewed 2026-09-12. See the [detumble CLI/progress guide](leop_detumble_mc.md) and [Science runtime report](SIMULATION_RUNTIME_FIX_REPORT.md). Progress is implemented in the parent runner, not in these shared physics classes. Science's local FSM now prioritizes fault handling for frozen SLEWING; that change is not part of the shared FSM priority list below.
+
 ## Dependencies
 - **Standard Library**: `math`, `dataclasses`, `enum`, `pathlib`, `typing`
 - **External**: `numpy` only
@@ -23,6 +25,7 @@
 | `IllegalFSMTransitionError` | `Exception` | Raised on illegal FSM state transitions |
 | `SpacecraftFSM` | `class` | 7-state finite state machine with debounced fault logic |
 | `ADCSModel` | `class` | Attitude determination & control with quaternion dynamics, B-dot, wheel damping, saturation |
+| `EPSModel` | `class` | Shared electrical power model; Science currently defines a separate local version |
 
 ---
 
@@ -204,7 +207,9 @@ Initializes quaternion to identity, body rates from config tip-off values, wheel
 
 #### Bug Fixes Included
 - **Bug 11**: Explicit re-normalization after every quaternion integration step prevents drift-induced sign flips (~71/hr → 0)
-- **Wheel damping**: Per-axis inertia-scaled `tau_i = -k_damp * I_i * omega_i` with `k_damp = 0.4/dt` — stable on all axes regardless of inertia asymmetry
+- **Wheel damping**: Per-axis inertia-scaled `tau_i = -k_damp * I_i * omega_i`; implementation reads `config.wheel_rate_damp_gain` (default 0.2), despite an older docstring mentioning `0.4/dt`
+- **Moving target commands**: An ongoing slew preserves commanded speed when its target is refreshed in the same mode; acceleration and maximum-rate limits still apply
+- **Saturation state**: Saturation freezes the ADCS target at the current quaternion and clears slew/settling flags. This is not proof of convergence to the original mission objective; Science preserves that objective and handles recovery separately
 
 ---
 
@@ -243,7 +248,8 @@ mode, reason = fsm.evaluate(
     pointing_budget_limit_deg=5.0,
     detumble_complete=True,
 )
-# Returns: ('DETECTION', 'Inside SAA with sufficient power')
+# A fresh FSM starts in COLD_AND_DARK. Advance startup/time explicitly before
+# expecting nominal DETECTION decisions; detumble_complete alone does not skip startup.
 ```
 
 ---
@@ -252,7 +258,8 @@ mode, reason = fsm.evaluate(
 
 | File | Imports |
 |------|---------|
-| `src/ANTARA_Science_Sim.py` | `MissionConfig`, `ADCSModel`, `SpacecraftFSM`, `SunSubmode`, `IllegalFSMTransitionError`, `_as_flat_vector`, `BODY_AXIS_VECTORS` |
+| `src/ANTARA_Science_Sim.py` | Shared config, ADCS and axis definitions; imported EPS/FSM/exception names are subsequently shadowed by local definitions |
+| `src/scenarios.py` | `MissionConfig` directly, avoiding duplicate imports of the simulator |
 | `src/leop_detumble_mc.py` | `MissionConfig`, `ADCSModel`, `_as_flat_vector` |
 | `src/analyze_detumble_mc.py` | `MissionConfig` |
 | `tests/validation/test_comms_link_budget.py` | `MissionConfig` |
@@ -265,10 +272,10 @@ mode, reason = fsm.evaluate(
 
 ## Notes / TODOs
 
-- **Deliberate scope**: Only models with **zero Orekit/cartopy/shapely/matplotlib/pyIGRF/spacepy dependencies** live here. Subsystems needing Orekit (SAAModel, GroundStationModel, IGRFModel, ProtonEnvironmentModel, PayloadModel, CommunicationsModel, TelemetryLogger, ANTARAScienceSimulator) remain in `ANTARA_Science_Sim.py`.
-- **Future extraction candidates**: `EPSModel` (only needs numpy), `SAAModel` (needs shapely) — would require optional dependency handling.
-- **Version sync**: When modifying `MissionConfig` fields, update both `antara_models.py` and `ANTARA_Science_Sim.py` (the latter re-exports from this module).
-- **Test coverage**: `test_fsm_spec_matches_code.py` validates FSM logic against `fsm_spec.py`.
+- **Deliberate scope**: Shared models have no Orekit/cartopy/shapely/matplotlib/ppigrf/spacepy dependencies. Science-specific geometry, environment, payload, logging, and runner classes remain in `ANTARA_Science_Sim.py`.
+- **Partial extraction**: `EPSModel` is present here, but Science still defines local EPS/FSM/exception classes after importing shared names. Inspect the actual implementation used by a consumer before propagating a fix.
+- **Configuration ownership**: Edit Science's `MissionConfig` here; the simulator re-exports it rather than maintaining another dataclass. Other standalone entrypoints may define independent configurations.
+- **Test coverage**: `test_fsm_spec_matches_code.py` validates this module's FSM against `fsm_spec.py`, not Science's local FSM. `test_physics_attitude.py` exercises simulator geometry, backend units, and CLI controls.
 
 ---
 

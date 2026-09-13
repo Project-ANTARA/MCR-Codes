@@ -1,5 +1,11 @@
 # ANTARA_avg.py
 
+## Current scope (2026-09-12)
+
+Source: [ANTARA_avg.py](../src/ANTARA_avg.py). This battery-sizing campaign uses independent module constants and a global-step ETA, not the detumble process pool or Science scenario CLI. Edit `BATTERY_CASES`/campaign constants in its source to change cases; preserve `results/avg/` before rerunning. Recent detumble and Science tests do not establish annual battery-sizing accuracy.
+
+Setup and navigation: [repository README](../README.md) · [documentation index](README.md). Supporting study results were not rerun as part of this documentation review.
+
 ## File Overview
 Monte Carlo battery sizing study for the ANTARA mission. Runs 365-day numerical propagation for a single RAAN (75°) with 3 Monte Carlo runs, testing battery capacity cases (currently only 25 Wh). Randomizes altitude, drag coefficient, SRP coefficient, battery efficiency, and solar tracking error. Produces per-run timeseries CSVs and statistical summaries with 99% confidence intervals.
 
@@ -10,7 +16,7 @@ Monte Carlo battery sizing study for the ANTARA mission. Runs 365-day numerical 
 - **Orekit/Java Modules**: Same as `ANTARA_MCR.py` (numerical propagation with DTM2000, drag, SRP, 3-body, eclipse detector)
 
 ## Exports / Public API
-This script has no exported functions/classes — it runs as a standalone Monte Carlo campaign when executed.
+The script defines the helpers below and executes its campaign at module scope; importing it can begin the annual study and write outputs.
 
 ### Configuration Constants (Module-Level)
 | Constant | Value | Description |

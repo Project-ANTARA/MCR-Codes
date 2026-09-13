@@ -1,5 +1,11 @@
 # ANTARA_FINAL_POWERGEN.py
 
+## Current scope (2026-09-12)
+
+Source: [ANTARA_FINAL_POWERGEN.py](../src/ANTARA_FINAL_POWERGEN.py). This standalone panel trade uses its own `NadirPointing` provider, fixed -Z panel, and independent wing tracking assumptions. Do not apply Science's +Y relay mapping or `MissionConfig` values to it. The sweep includes both 0° and 360°: 25 samples representing 24 unique RAAN directions, with random tracking realizations.
+
+Setup and navigation: [repository README](../README.md) · [documentation index](README.md). Supporting study results were not rerun as part of this documentation review.
+
 ## File Overview
 RAAN optimization analysis for solar power generation. Runs short (24-hour) numerical propagation for RAAN values 0°–360° in 15° steps, computing average/peak power and eclipse fraction for a 3U CubeSat with 1 fixed zenith panel (-Z) + 2 deployed wings. Identifies optimal RAAN for maximum average power at equinox (March 20).
 
@@ -58,7 +64,7 @@ for RAAN in range(0, 361, 15):
 ```
 
 ### Power Model Details
-- **Fixed zenith panel**: Body-mounted on -Z face (Earth-facing in nadir-pointing). Generates power when Sun has positive projection on -Z body axis.
+- **Fixed panel**: Body-mounted on -Z in this study's attitude frame. Power uses the positive Sun projection on that axis; this is not Science's panel/relay frame implementation.
 - **Deployed wings**: Assumed to track Sun with Gaussian pointing error (2° bias, 5° σ). No cosine loss from body attitude — wings actively track.
 - **System efficiency chain**: 0.85 (MPPT) × 0.90 (harness) × 0.95 (thermal/aging) = 0.72675
 
