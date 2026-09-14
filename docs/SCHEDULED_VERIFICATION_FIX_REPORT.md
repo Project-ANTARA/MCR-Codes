@@ -4,6 +4,30 @@ Date: 2026-09-13. Starting revision: `ce4557ce8aac29cf074b742599374a979e1d48e0`;
 
 ## Observed failures
 
+### Unit-test follow-up (2026-09-14)
+
+[Run 34780094440](https://github.com/Project-ANTARA/MCR-Codes/actions/runs/34780094440)
+crashed inside pytest's verbose terminal reporter with exit 3 after 27 tests
+passed. The detumble progress tests mutated the shared standard-library
+`shutil.get_terminal_size` using a zero-argument lambda. Pytest called that mock
+with `fallback=(80, 24)` before fixture teardown, causing `TypeError`. The same
+failure was reproduced locally using `-v`; earlier quiet-mode passes did not
+exercise this reporter path.
+
+The tests now replace only `leop_detumble_mc`'s module bindings for `shutil`,
+`sys`, and the fake clock. The terminal-size fake accepts the normal fallback
+argument, and regression assertions confirm shared stdlib functions and stderr
+remain untouched. Simulation and CI assertions are unchanged. Verify with the
+workflow's verbose mode, not just `-q`; a new hosted run is still required.
+
+Local verification: Python 3.10.21 / pytest 9.1.1, **49 passed** in 9.01 seconds
+with `-v --tb=short --disable-warnings` across physics/attitude, detumble,
+scheduled-validation, FSM, and installer tests. The flag hides only the warning
+summary (3,448 wrapper deprecations); tests and verbose progress remain enabled.
+`git diff --check` passed. CI's Python 3.11 rerun has not been performed.
+
+### Original nightly/weekly investigation
+
 - [Nightly run 34743815167](https://github.com/Project-ANTARA/MCR-Codes/actions/runs/34743815167) failed at 9.65 simulated hours with `RELAY pointing error 6.005910 deg`. It ran older revision `3ace53f0a1bf3dd95a24228c231f53ff50143d09`, before the runtime repairs already present in the starting revision. Physics installation and backend verification succeeded.
 - [Weekly run 34746578186](https://github.com/Project-ANTARA/MCR-Codes/actions/runs/34746578186) was cancelled during setup, not a failed physics test. Its 08:00 start overlapped the 08:00:05 push. All events previously shared a cancellable workflow/ref concurrency group.
 - Local validation independently reproduced missing UTC data. Subsequent harness defects included undefined `org`, NumPy scalars rejected by Java constructors, unsupported orbit conversion, and singular near-circular Keplerian integration.

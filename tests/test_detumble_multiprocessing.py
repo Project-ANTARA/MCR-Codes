@@ -54,10 +54,20 @@ def test_cli_pickle_loads_in_another_process(tmp_path):
 def test_progress_counts_eta_and_terminal_cleanup(monkeypatch, interactive):
     stream = io.StringIO()
     monkeypatch.setattr(stream, 'isatty', lambda: interactive)
-    monkeypatch.setattr(mc.sys, 'stderr', stream)
-    monkeypatch.setattr(mc.shutil, 'get_terminal_size', lambda: os.terminal_size((200, 24)))
+    # Replace only this module's bindings, not stdlib objects shared by pytest.
+    original_sys, original_shutil, original_time = mc.sys, mc.shutil, mc.time
+    terminal_size = original_shutil.get_terminal_size
+    monotonic = original_time.monotonic
+    stderr = original_sys.stderr
+    monkeypatch.setattr(mc, 'sys', SimpleNamespace(stderr=stream))
+    monkeypatch.setattr(mc, 'shutil', SimpleNamespace(
+        get_terminal_size=lambda fallback=(80, 24): os.terminal_size((200, 24))))
     clock = [0.]
-    monkeypatch.setattr(mc.time, 'monotonic', lambda: clock[0])
+    monkeypatch.setattr(mc, 'time', SimpleNamespace(monotonic=lambda: clock[0]))
+    assert original_shutil.get_terminal_size is terminal_size
+    assert original_time.monotonic is monotonic
+    assert original_sys.stderr is stderr
+    assert terminal_size(fallback=(80, 24)).columns > 0
     progress = mc._TrialProgress(3, True)
     progress.trial_update(0., 'BDOT', 9.)
     progress.record(SimpleNamespace(success=True, hit_rate_cap=False))
@@ -76,8 +86,9 @@ def test_progress_counts_eta_and_terminal_cleanup(monkeypatch, interactive):
 def test_progress_clears_wrapped_terminal_lines(monkeypatch):
     stream = io.StringIO()
     monkeypatch.setattr(stream, 'isatty', lambda: True)
-    monkeypatch.setattr(mc.sys, 'stderr', stream)
-    monkeypatch.setattr(mc.shutil, 'get_terminal_size', lambda: os.terminal_size((40, 24)))
+    monkeypatch.setattr(mc, 'sys', SimpleNamespace(stderr=stream))
+    monkeypatch.setattr(mc, 'shutil', SimpleNamespace(
+        get_terminal_size=lambda fallback=(80, 24): os.terminal_size((40, 24))))
     progress = mc._TrialProgress(1, True)
     progress.render(force=True)
     assert progress.line_count > 1
