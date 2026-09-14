@@ -81,7 +81,7 @@ def test_ci_uses_fixed_two_second_steps(scenario):
 
 def test_igrf_altitude_units_and_ned_order():
     model = IGRFModel(2025.)
-    east, north, up = ppigrf.igrf(20., 10., 600., datetime(2025, 3, 1))
+    east, north, up = ppigrf.igrf(20., 10., 600., datetime(2025, 1, 1))
     actual = model.get_ned_field_tesla(10., 20., 600.)
     assert actual.shape == (3,) and np.isfinite(actual).all()
     np.testing.assert_allclose(actual, np.array([north.item(), east.item(), -up.item()]) * 1e-9, rtol=1e-12, atol=0)

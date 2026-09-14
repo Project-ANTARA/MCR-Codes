@@ -21,12 +21,20 @@ Core dependencies include Orekit, NumPy, pandas, and Shapely. Plot imports are g
 
 `IGRFModel(epoch_year)` exposes:
 
-- `get_ned_field_tesla(lat_deg, lon_deg, alt_km)`: shape `(3,)`, North/East/Down in Tesla.
-- `get_inertial_field_tesla(lat_deg, lon_deg, alt_km, position_inertial)`: converts the field for pitch-angle calculations.
+- `get_ned_field_tesla(lat_deg, lon_deg, alt_km, date=None)`: shape `(3,)`, North/East/Down in Tesla. An explicit date is UTC; otherwise the configured decimal year is used.
+- `get_inertial_field_tesla(lat_deg, lon_deg, alt_km, absolute_date, earth_frame, inertial_frame)`: queries at the mission epoch and rotates the field into the requested inertial frame.
 
 The backend is `ppigrf.igrf(lon, lat, altitude_km, date)`, returning East/North/Up arrays in nT. Version 2.1.0 defaults to IGRF-14 coefficients. The historical `_PYIGRF_AVAILABLE` flag describes **ppigrf** availability; it does not imply a `pyIGRF` import. Missing ppigrf warns and falls back to a centered dipole.
 
-Altitude must remain in kilometers at the backend boundary. The existing epoch mapping uses March 1 of the configured integer year, and the inertial conversion is an approximate static rotation rather than a full Earth-fixed/time-dependent frame transform.
+Altitude remains in kilometers at the backend boundary. Decimal years preserve the fraction of the actual calendar year, including leap years: `2000.25` means April 1 at 12:00 UTC. Runtime inertial queries use the current `OrbitState.absolute_date`, not a frozen configured epoch. The NED basis first produces an Earth-fixed vector; Orekit's rotation at that same date then maps it into the simulator's inertial frame. No translation is applied to a magnetic-field vector. The dipole fallback follows the same rotation. The separate configured `earth_b_field_model="dipole"` branch is unchanged.
+
+### Ground-station consistency
+
+Visibility, relay LOS, off-boresight angle, link elevation and downlink credit use one selection policy: highest elevation among stations above their own masks, with the primary winning ties. Contact histories retain each station's own elevation and visibility, including downlink credit at AOS. No visible station means no active link. Station selection is an epoch-local query, so look-ahead propagation cannot replace the current target. Existing finite slew and settlement checks still apply; there is no instantaneous attitude switch.
+
+### Invalid detumble dynamics
+
+The shared ADCS rejects non-finite body rates, fields, torques and invalid timesteps/inertias. Integration overflow raises instead of zeroing rates and falsely reporting successful detumbling. Valid rigid-body integration and existing finite-rate caps are unchanged. This does not yet repair the Monte Carlo acceleration-input or wheel-momentum accounting issues identified in the audit; see the [repair backlog](SCIENTIFIC_INTEGRITY_REPAIR.md).
 
 ### Proton environment and AP9 limitation
 

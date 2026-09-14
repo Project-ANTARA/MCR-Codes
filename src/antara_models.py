@@ -823,20 +823,25 @@ class ADCSModel:
 
         torque_vec_nm = _as_flat_vector(torque_vec_nm)
         omega_rad_sec = np.radians(self.body_rate_deg_sec)
-        if not np.all(np.isfinite(omega_rad_sec)):
-            self.body_rate_deg_sec[:] = 0.0
-            self.body_accel_deg_sec2[:] = 0.0
-            return
-        inertia = np.maximum(self.inertia_tensor_kgm2, 1.0e-9)
-        angular_momentum = inertia * omega_rad_sec
-        gyro_term = np.cross(omega_rad_sec, angular_momentum)
-        omega_dot_rad_sec2 = (torque_vec_nm - gyro_term) / inertia
-        self.body_accel_deg_sec2 = np.degrees(omega_dot_rad_sec2)
-        omega_rad_sec = omega_rad_sec + (omega_dot_rad_sec2 * dt_sec)
-        updated_body_rate_deg_sec = np.degrees(omega_rad_sec)
-        if not np.all(np.isfinite(updated_body_rate_deg_sec)):
-            updated_body_rate_deg_sec = np.zeros(3, dtype=float)
+        inertia = _as_flat_vector(self.inertia_tensor_kgm2)
+        if not (np.all(np.isfinite(omega_rad_sec)) and np.all(np.isfinite(torque_vec_nm))):
+            raise ValueError("ADCS body rates and torque must be finite")
+        if not math.isfinite(dt_sec) or dt_sec < 0.0:
+            raise ValueError("ADCS timestep must be finite and nonnegative")
+        if not np.all(np.isfinite(inertia)) or np.any(inertia <= 0.0):
+            raise ValueError("ADCS principal inertias must be finite and positive")
+        # Reject divergence before updating state. Zeroing NaN/Inf can falsely
+        # satisfy the detumble completion threshold on the very same step.
+        with np.errstate(over="raise", invalid="raise", divide="raise"):
+            angular_momentum = inertia * omega_rad_sec
+            gyro_term = np.cross(omega_rad_sec, angular_momentum)
+            omega_dot_rad_sec2 = (torque_vec_nm - gyro_term) / inertia
+            acceleration = np.degrees(omega_dot_rad_sec2)
+            updated_body_rate_deg_sec = np.degrees(omega_rad_sec + omega_dot_rad_sec2 * dt_sec)
+        if not (np.all(np.isfinite(updated_body_rate_deg_sec)) and np.all(np.isfinite(acceleration))):
+            raise FloatingPointError("Non-finite ADCS integration result")
         rate_cap_deg_sec = max(120.0, 10.0 * self.config.max_slew_rate_deg_sec)
+        self.body_accel_deg_sec2 = acceleration
         self.body_rate_deg_sec = np.clip(updated_body_rate_deg_sec, -rate_cap_deg_sec, rate_cap_deg_sec)
 
     def _integrate_quaternion_from_body_rates(self, dt_sec: float) -> None:
@@ -919,6 +924,12 @@ class ADCSModel:
 
     def step_detumble(self, b_body_t: np.ndarray, dt_sec: float) -> np.ndarray:
         """Advance the two-stage detumble controller and return wheel torque demand."""
+
+        b_body_t = _as_flat_vector(b_body_t)
+        if not (np.all(np.isfinite(self.body_rate_deg_sec)) and np.all(np.isfinite(b_body_t))):
+            raise ValueError("Detumble body rates and magnetic field must be finite")
+        if not math.isfinite(dt_sec) or dt_sec < 0.0:
+            raise ValueError("Detumble timestep must be finite and nonnegative")
 
         if self.detumble_complete:
             self.current_bdot_torque_nm = np.zeros(3, dtype=float)

@@ -14,7 +14,7 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 import orekit
 import pandas as pd
-from datetime import datetime
+from datetime import datetime, timedelta
 from paths import figures_path, init_orekit_data, results_path
 
 # Import core models from shared module (no Orekit dependencies)
@@ -129,6 +129,22 @@ class OrbitState:
     sat_position_earth_frame: Vector3D
     sat_position_inertial: Vector3D
     sat_velocity_inertial: Vector3D
+
+
+@dataclass(frozen=True)
+class GroundStationGeometry:
+    """One epoch's visibility and deterministic highest-elevation link choice."""
+
+    primary_elevation_deg: float
+    secondary_elevation_deg: float
+    primary_visible: bool
+    secondary_visible: bool
+    selected_station: Optional[GroundStationModel]
+    selected_elevation_deg: float
+
+    @property
+    def visible(self) -> bool:
+        return self.selected_station is not None
 
 
 @dataclass
@@ -415,7 +431,7 @@ class GroundStationModel:
                 "aos_time": absolute_date.toString(),
                 "aos_time_sec": time_sec,
                 "max_el_deg": elevation_deg,
-                "downlinked_mb": 0.0,
+                "downlinked_mb": downlinked_step_mb,
             }
             return "AOS", dict(self.current_contact)
 
@@ -471,8 +487,11 @@ class IGRFModel:
     EARTH_RADIUS_M: float = 6_371_000.0   # mean Earth radius (m)
 
     def __init__(self, epoch_year: float) -> None:
-        """Store the decimal-year epoch used for all IGRF queries."""
+        """Store the default decimal-year epoch for standalone NED queries."""
         self.epoch_year = epoch_year
+        year = math.floor(epoch_year)
+        start = datetime(year, 1, 1)
+        self.epoch_date = start + (datetime(year + 1, 1, 1) - start) * (epoch_year - year)
         self._available = _PYIGRF_AVAILABLE
 
     def get_ned_field_tesla(
@@ -480,6 +499,7 @@ class IGRFModel:
         lat_deg: float,
         lon_deg: float,
         alt_km: float,
+        date: Optional[datetime] = None,
     ) -> np.ndarray:
         """
         Query IGRF at (lat, lon, alt) and return [Bn, Be, Bd] in Tesla.
@@ -489,6 +509,7 @@ class IGRFModel:
         lat_deg : geodetic latitude (degrees, positive north)
         lon_deg : geodetic longitude (degrees, positive east)
         alt_km  : altitude above WGS-84 ellipsoid (km)
+        date    : UTC query date; omitted uses the configured decimal year
 
         Returns
         -------
@@ -498,7 +519,7 @@ class IGRFModel:
             return self._dipole_ned_tesla(lat_deg, lon_deg, alt_km)
 
         # ppigrf expects geodetic altitude in km and returns East/North/Up in nT.
-        date = datetime(int(self.epoch_year), 3, 1)   # approximate from decimal year
+        date = self.epoch_date if date is None else date
         Be, Bn, Bu = ppigrf.igrf(lon_deg, lat_deg, alt_km, date)
         b_north_t =  float(np.asarray(Bn).item()) * 1e-9   # north
         b_east_t  =  float(np.asarray(Be).item()) * 1e-9   # east
@@ -510,25 +531,29 @@ class IGRFModel:
         lat_deg: float,
         lon_deg: float,
         alt_km: float,
-        position_inertial: np.ndarray,
+        absolute_date: AbsoluteDate,
+        earth_frame,
+        inertial_frame,
     ) -> np.ndarray:
         """
-        Return the IGRF field vector expressed in the EME2000 inertial frame.
-
-        Converts NED → ECEF → inertial via the geographic position unit vectors.
-        This is a static rotation (uses only the satellite position unit vector),
-        not a full frame transform, which is sufficient for pitch-angle computation.
+        Return the field at the mission date, rotated NED → Earth-fixed → inertial.
 
         Parameters
         ----------
         lat_deg, lon_deg, alt_km : geodetic position
-        position_inertial        : satellite position in inertial frame (m)
+        absolute_date           : mission epoch for the field and frame rotation
+        earth_frame             : frame used to obtain the geodetic coordinates
+        inertial_frame          : destination frame, normally EME2000
 
         Returns
         -------
         np.ndarray shape (3,) — B-field in inertial frame (Tesla)
         """
-        b_ned = self.get_ned_field_tesla(lat_deg, lon_deg, alt_km)
+        components = absolute_date.getComponents(TimeScalesFactory.getUTC())
+        day = components.getDate()
+        query_date = datetime(day.getYear(), day.getMonth(), day.getDay()) + timedelta(
+            seconds=components.getTime().getSecondsInLocalDay())
+        b_ned = self.get_ned_field_tesla(lat_deg, lon_deg, alt_km, date=query_date)
         b_n, b_e, b_d = b_ned
 
         # NED → ECEF rotation matrix columns:
@@ -544,9 +569,10 @@ class IGRFModel:
         e_down  = np.array([-cl * cn, -cl * sn, -sl], dtype=float)
         b_ecef = b_n * e_north + b_e * e_east + b_d * e_down
 
-        # ECEF ≈ inertial over orbital timescales for B-field direction purposes
-        # (Earth rotation changes B direction by < 0.004 deg per 2-s step)
-        return b_ecef
+        # A field is a free vector: apply rotation only, never translation.
+        rotation = earth_frame.getTransformTo(inertial_frame, absolute_date).getRotation()
+        field = rotation.applyTo(Vector3D(*[float(value) for value in b_ecef]))
+        return np.array([field.getX(), field.getY(), field.getZ()], dtype=float)
 
     def _dipole_ned_tesla(
         self,
@@ -2949,12 +2975,53 @@ class ANTARAScienceSimulator:
 
         return self._unit_numpy(self._vector_to_numpy(orbit_state.sat_velocity_inertial))
 
+    def _ground_station_geometry(self, orbit_state: OrbitState) -> GroundStationGeometry:
+        """Select from visible stations, keeping the primary on elevation ties.
+
+        This query has no side effects so predicted and current epochs cannot
+        overwrite one another's targets. All relay geometry uses this policy.
+        """
+        primary = self.ground_station
+        secondary = self.ground_station_2
+        position, date = orbit_state.sat_position_earth_frame, orbit_state.absolute_date
+        primary_el = primary.get_elevation(position, date)
+        primary_visible = primary.is_visible(primary_el)
+        secondary_el = secondary.get_elevation(position, date) if secondary is not None else 0.0
+        secondary_visible = secondary is not None and secondary.is_visible(secondary_el)
+        selected = primary if primary_visible else None
+        elevation = primary_el
+        if secondary_visible and (not primary_visible or secondary_el > primary_el):
+            selected, elevation = secondary, secondary_el
+        return GroundStationGeometry(primary_el, secondary_el, primary_visible,
+                                     secondary_visible, selected, elevation)
+
+    def _record_ground_station_contacts(
+        self, geometry: GroundStationGeometry, time_sec: float,
+        absolute_date: AbsoluteDate, downlinked_mb: float,
+    ) -> None:
+        """Keep visibility history per station and credit only the selected link."""
+        self.ground_station.detect_aos_los(
+            self.previous_gs_visible, geometry.primary_visible, time_sec,
+            geometry.primary_elevation_deg, absolute_date,
+            downlinked_mb if geometry.selected_station is self.ground_station else 0.0)
+        if self.ground_station_2 is not None:
+            self.ground_station_2.detect_aos_los(
+                self.previous_gs_visible_2, geometry.secondary_visible, time_sec,
+                geometry.secondary_elevation_deg, absolute_date,
+                downlinked_mb if geometry.selected_station is self.ground_station_2 else 0.0)
+        self.previous_gs_visible = geometry.primary_visible
+        self.previous_gs_visible_2 = geometry.secondary_visible
+
     def _ground_station_vector_unit(self, orbit_state: OrbitState) -> np.ndarray:
-        """Return the inertial line-of-sight vector from spacecraft to GS_INDIA."""
+        """Return LOS to the selected visible station (primary if none visible)."""
+
+        station = self._ground_station_geometry(orbit_state).selected_station
+        if station is None:
+            station = self.ground_station
 
         # Use the TopocentricFrame PV transformation directly because some Orekit
         # Python wrapper builds do not expose Transform.transformPosition().
-        station_position_inertial = self.ground_station.frame.getPVCoordinates(
+        station_position_inertial = station.frame.getPVCoordinates(
             orbit_state.absolute_date,
             self.inertial_frame,
         ).getPosition()
@@ -2971,7 +3038,9 @@ class ANTARAScienceSimulator:
                 orbit_state.latitude_deg,
                 orbit_state.longitude_deg,
                 orbit_state.altitude_km,
-                self._vector_to_numpy(orbit_state.sat_position_inertial),
+                orbit_state.absolute_date,
+                self.earth_frame,
+                self.inertial_frame,
             )
 
         position_inertial = self._vector_to_numpy(orbit_state.sat_position_inertial)
@@ -4911,30 +4980,9 @@ class ANTARAScienceSimulator:
             self.orbital_period_history_min.append(osculating_period_min)
             self.beta_angle_history_deg.append(orbit_state.beta_angle_deg)
 
-            gs_elevation_deg = self.ground_station.get_elevation(
-                orbit_state.sat_position_earth_frame,
-                orbit_state.absolute_date,
-            )
-            gs_visible_primary = self.ground_station.is_visible(gs_elevation_deg)
-
-            # Fix 6: second ground station visibility
-            gs_elevation_deg_2 = 0.0
-            gs_visible_2 = False
-            if self.ground_station_2 is not None:
-                gs_elevation_deg_2 = self.ground_station_2.get_elevation(
-                    orbit_state.sat_position_earth_frame,
-                    orbit_state.absolute_date,
-                )
-                gs_visible_2 = self.ground_station_2.is_visible(gs_elevation_deg_2)
-
-            # Use the station with the higher elevation when both are visible;
-            # otherwise fall back to whichever one is above its mask.
-            if gs_visible_primary and gs_visible_2:
-                if gs_elevation_deg_2 > gs_elevation_deg:
-                    gs_elevation_deg = gs_elevation_deg_2
-            elif gs_visible_2:
-                gs_elevation_deg = gs_elevation_deg_2
-            gs_visible = gs_visible_primary or gs_visible_2
+            gs_geometry = self._ground_station_geometry(orbit_state)
+            gs_elevation_deg = gs_geometry.selected_elevation_deg
+            gs_visible = gs_geometry.visible
             inside_saa = self.saa.is_inside(orbit_state.latitude_deg, orbit_state.longitude_deg)
             sun_visible = not orbit_state.in_eclipse
             illumination_fraction = self._update_illumination_fraction(sun_visible, time_sec)
@@ -5140,49 +5188,9 @@ class ANTARAScienceSimulator:
                     science_data_step_mb += saa_pass_close_flushed_mb
                 self._saa_pass_index += 1
 
-            # FIX (Bug 4): Previously downlinked_step_mb was always passed to the
-            # primary station's detect_aos_los, even when the active link was via
-            # GS2. This caused gs_contacts.csv to record contacts with
-            # downlinked_mb=0.0 whenever GS2 was the sole visible station.
-            # Now we route the downlink credit to whichever station is active.
-            # If both are visible we credit the one with the higher elevation
-            # (consistent with the gs_elevation_deg selection above).
-            primary_downlink_credit = 0.0
-            gs2_downlink_credit = 0.0
-            if downlinked_step_mb > 0.0:
-                if gs_visible_primary and gs_visible_2:
-                    if gs_elevation_deg_2 > self.ground_station.get_elevation(
-                        orbit_state.sat_position_earth_frame, orbit_state.absolute_date
-                    ):
-                        gs2_downlink_credit = downlinked_step_mb
-                    else:
-                        primary_downlink_credit = downlinked_step_mb
-                elif gs_visible_primary:
-                    primary_downlink_credit = downlinked_step_mb
-                elif gs_visible_2:
-                    gs2_downlink_credit = downlinked_step_mb
-
-            gs_event = self.ground_station.detect_aos_los(
-                self.previous_gs_visible,
-                gs_visible_primary,
-                time_sec,
-                gs_elevation_deg,
-                orbit_state.absolute_date,
-                primary_downlink_credit,
-            )
-            # Fix 6: also advance second station contact tracking
-            if self.ground_station_2 is not None:
-                self.ground_station_2.detect_aos_los(
-                    self.previous_gs_visible_2 if hasattr(self, "previous_gs_visible_2") else False,
-                    gs_visible_2,
-                    time_sec,
-                    gs_elevation_deg_2,
-                    orbit_state.absolute_date,
-                    gs2_downlink_credit,
-                )
+            self._record_ground_station_contacts(
+                gs_geometry, time_sec, orbit_state.absolute_date, downlinked_step_mb)
             self.previous_in_saa = inside_saa
-            self.previous_gs_visible = gs_visible
-            self.previous_gs_visible_2 = gs_visible_2
 
             if current_mode != "DETUMBLE":
                 torque_vector_nm = self.adcs.estimate_torque_vector()
@@ -5524,27 +5532,9 @@ class ANTARAScienceSimulator:
             propagated_state = self._propagate_state(absolute_date)
             orbit_state = self._build_orbit_state(propagated_state, time_sec)
 
-            gs_elevation_deg = self.ground_station.get_elevation(
-                orbit_state.sat_position_earth_frame,
-                orbit_state.absolute_date,
-            )
-            gs_visible_primary = self.ground_station.is_visible(gs_elevation_deg)
-
-            gs_elevation_deg_2 = 0.0
-            gs_visible_2 = False
-            if self.ground_station_2 is not None:
-                gs_elevation_deg_2 = self.ground_station_2.get_elevation(
-                    orbit_state.sat_position_earth_frame,
-                    orbit_state.absolute_date,
-                )
-                gs_visible_2 = self.ground_station_2.is_visible(gs_elevation_deg_2)
-
-            if gs_visible_primary and gs_visible_2:
-                if gs_elevation_deg_2 > gs_elevation_deg:
-                    gs_elevation_deg = gs_elevation_deg_2
-            elif gs_visible_2:
-                gs_elevation_deg = gs_elevation_deg_2
-            gs_visible = gs_visible_primary or gs_visible_2
+            gs_geometry = self._ground_station_geometry(orbit_state)
+            gs_elevation_deg = gs_geometry.selected_elevation_deg
+            gs_visible = gs_geometry.visible
 
             inside_saa = self.saa.is_inside(orbit_state.latitude_deg, orbit_state.longitude_deg)
             sun_visible = not orbit_state.in_eclipse

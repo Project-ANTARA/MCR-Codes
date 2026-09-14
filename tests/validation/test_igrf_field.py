@@ -23,7 +23,7 @@ import numpy as np
 from spacepy import coordinates, irbempy, time
 
 # IGRF model from ANTARA_Science_Sim
-from ANTARA_Science_Sim import IGRFModel, MissionConfig
+from ANTARA_Science_Sim import IGRFModel
 
 
 # Retain the original locations and old magnitudes for audit only. The old
@@ -63,9 +63,10 @@ def reference_field_ned(lat, lon, alt, year):
 
     SpacePy 0.7 bundles IGRF-13, valid through 2025.0. Its endpoint is used
     explicitly for 2025 comparisons; this is not an IGRF-14 epoch validation.
-    ANTARA currently maps decimal epochs to March 1 of their integer year.
+    Both models use the requested decimal year, including leap-year fractions.
     """
-    date = datetime(int(year), 3, 1) if year < 2025 else datetime(2025, 1, 1)
+    start = datetime(int(year), 1, 1)
+    date = start + (datetime(int(year) + 1, 1, 1) - start) * (year - int(year))
     ticks = time.Ticktock([date], "UTC")
     loci = coordinates.Coords([[alt, lat, lon]], "GDZ", "sph", use_irbem=True)
     result = irbempy.get_Bfield(ticks, loci, extMag="0", options=[0, 1, 0, 0, 0])
@@ -83,10 +84,9 @@ def main():
     print("=" * 70)
     print("Reference: independent IRBEM IGRF-13, no external field")
     print(f"Test points: {len(IGRF_REFERENCE_POINTS)} locations spanning SAA and globe")
-    print("Epochs: ANTARA March 1 mapping; IRBEM 2025 endpoint uses January 1")
+    print("Epochs: matching decimal years; 2025.0 is the IRBEM IGRF-13 endpoint")
 
-    config = MissionConfig()
-    igrf = IGRFModel(config.igrf_epoch_year)
+    igrf = IGRFModel(2000.25)
     if not igrf._available:
         raise RuntimeError("ppigrf is required; dipole fallback is not IGRF validation")
 
@@ -95,12 +95,7 @@ def main():
 
     for i, (lat, lon, alt, year, legacy_mag_nT, desc) in enumerate(IGRF_REFERENCE_POINTS):
         # Get field from IGRF model
-        if year != 2000.25:
-            # Need to create IGRF with different epoch
-            test_igrf = IGRFModel(year)
-            b_ned = test_igrf.get_ned_field_tesla(lat, lon, alt)
-        else:
-            b_ned = igrf.get_ned_field_tesla(lat, lon, alt)
+        b_ned = IGRFModel(year).get_ned_field_tesla(lat, lon, alt)
 
         b_mag_t = float(np.linalg.norm(b_ned))
         b_mag_nT = b_mag_t * 1e9

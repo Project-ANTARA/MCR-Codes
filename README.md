@@ -105,6 +105,8 @@ The verified one-hour runs each produce 1,801 telemetry rows (both endpoints inc
 
 The simulator imports **`ppigrf==2.1.0`**, not `pyIGRF`. Its IGRF-14 backend takes altitude in kilometers and returns East/North/Up in nT; ANTARA converts to North/East/Down in Tesla. Missing ppigrf selects a dipole fallback with a warning.
 
+When `earth_b_field_model="igrf"` is selected, Science queries at the actual mission date and rotates the Earth-fixed field into the inertial frame using Orekit. Standalone NED queries preserve decimal-year fractions. The September 2026 [scientific-integrity repair record](docs/SCIENTIFIC_INTEGRITY_REPAIR.md) tracks these corrections, dual-station consistency, invalid detumble-state rejection, and the unresolved audit backlog. Passing these regressions is not full-year scientific validation.
+
 **SpacePy 0.7.0 / IRBEM does not enable live AP9.** The current AP9 query uses an unsupported interface and retains the configured flux baseline, warning once when queried. `get_AEP8` supplies AE8/AP8; the verification script exercises AP8 only. This baseline feeds the primary proton-flux calculation, so it is not merely a plotting limitation. Keep Orekit, ppigrf, and SpacePy in the same environment; do not install physics packages only into base Conda or with `--user`.
 
 ### Outputs
@@ -170,6 +172,7 @@ Ensures code matches spec:
 ```bash
 python -m pytest tests/test_fsm_spec_matches_code.py -v
 PYTHONPATH=src python -m pytest tests/test_physics_attitude.py tests/test_detumble_multiprocessing.py -v
+PYTHONPATH=src python -m pytest tests/test_scientific_integrity.py -v
 ```
 
 The regressions cover startup geometry, negative alignments, IGRF units, CLI precedence, multirate accounting, saturation recovery, spawn-safe Monte Carlo serialization, and terminal progress. Numerical alignment uses normalized cross/dot `atan2` with unchanged `1e-6°` startup tolerance; this is not a flight pointing requirement. The [dependency repair report](OPENCODE_PHYSICS_ATTITUDE_FIX_REPORT.md) retains its earlier 14-test evidence; [runtime verification](docs/SIMULATION_RUNTIME_FIX_REPORT.md) records subsequent checks.
