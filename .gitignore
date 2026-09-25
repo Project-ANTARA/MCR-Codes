@@ -18,5 +18,8 @@ data/orekit-data.zip
 *.log
 
 # Archives
-*.zipminiconda.sh
+*.zip
 miniconda.sh
+
+*.pkl
+detumble_*.pkl
