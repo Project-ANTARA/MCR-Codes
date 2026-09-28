@@ -9,7 +9,7 @@ import sys
 import pandas as pd
 import pytest
 
-from compare_scenarios import (load_scenario_data, main as compare_main,
+from simulations.ditl.compare_scenarios import (load_scenario_data, main as compare_main,
                                compute_mode_duty_cycle, compute_saturation_holds,
                                compute_eclipse_fraction, compute_science_metrics,
                                compute_battery_stats, compute_attitude_error_per_mode,

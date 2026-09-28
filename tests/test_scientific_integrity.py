@@ -14,15 +14,15 @@ from org.orekit.frames import FramesFactory
 from org.orekit.time import AbsoluteDate, TimeScalesFactory
 from org.orekit.utils import IERSConventions
 
-import ANTARA_Science_Sim as science
-from antara_models import ADCSModel, MissionConfig
-from paths import init_orekit_data
+from simulations.ditl import ANTARA_Science_Sim as science
+from simulations.helper.antara_models import ADCSModel, MissionConfig
+from simulations.helper.paths import init_orekit_data
 
 
 @pytest.fixture(params=["shared", "master"])
 def wheel_model(request):
     if request.param == "master":
-        import ANTARA_Master as model
+        from simulations.legacy import ANTARA_Master as model
         return model.ADCSModel(model.MissionConfig())
     return ADCSModel(MissionConfig())
 

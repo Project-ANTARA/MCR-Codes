@@ -97,11 +97,11 @@ jobs:
           print("Orekit data downloaded")
           PY
 
-      - name: Syntax check all src/*.py
+      - name: Syntax check all Python sources recursively
         run: |
           set -euo pipefail
-          shopt -s nullglob
-          files=(src/*.py)
+          shopt -s nullglob globstar
+          files=(src/**/*.py)
 
           if [ ${#files[@]} -eq 0 ]; then
             echo "ERROR: No Python files found under src/"
@@ -119,22 +119,22 @@ jobs:
           import orekit
           orekit.initVM()
 
-          from ANTARA_Science_Sim import MissionConfig, ANTARAScienceSimulator
+          from simulations.ditl.ANTARA_Science_Sim import MissionConfig, ANTARAScienceSimulator
           print("ANTARA_Science_Sim imports OK")
 
-          from ANTARA_Master import MissionConfig, ANTARASimulator
+          from simulations.legacy.ANTARA_Master import MissionConfig, ANTARASimulator
           print("ANTARA_Master imports OK")
 
-          from leop_detumble_mc import run_single_trial, run_monte_carlo
+          from simulations.detumble.leop_detumble_mc import run_single_trial, run_monte_carlo
           print("leop_detumble_mc imports OK")
 
-          from compare_scenarios import load_scenario_data
+          from simulations.ditl.compare_scenarios import load_scenario_data
           print("compare_scenarios imports OK")
 
-          from scenarios import build_scenario
+          from simulations.ditl.scenarios import build_scenario
           print("scenarios imports OK")
 
-          from antara_models import MissionConfig, ADCSModel, SpacecraftFSM
+          from simulations.helper.antara_models import MissionConfig, ADCSModel, SpacecraftFSM
           print("antara_models imports OK")
           PY
 
@@ -197,7 +197,7 @@ jobs:
           python -m pytest tests/test_fsm_spec_matches_code.py -v --tb=short
 
       - name: Physics and attitude regression tests
-        run: python -m pytest tests/test_physics_attitude.py tests/test_scientific_integrity.py tests/test_execution_integrity.py tests/test_audit_repairs.py tests/test_slew_profile.py tests/test_wheel_events.py tests/test_telemetry_integrity.py tests/test_checkpoint_roundtrip.py tests/test_detumble_multiprocessing.py tests/test_scheduled_validation.py -v --tb=short
+        run: python -m pytest tests/test_physics_attitude.py tests/test_scientific_integrity.py tests/test_execution_integrity.py tests/test_audit_repairs.py tests/test_slew_profile.py tests/test_wheel_events.py tests/test_telemetry_integrity.py tests/test_checkpoint_roundtrip.py tests/test_detumble_multiprocessing.py tests/test_scheduled_validation.py tests/test_simulation_layout.py tests/test_repository_hygiene.py -v --tb=short
 
       - name: Syntax check validation tests
         run: |
@@ -276,7 +276,7 @@ jobs:
 
       - name: Run scenario ${{ matrix.scenario }} (1 hour)
         run: |
-          python src/ANTARA_Science_Sim.py \
+          python src/simulations/ditl/ANTARA_Science_Sim.py \
             --scenario "${{ matrix.scenario }}" \
             --duration-hours 1 \
             --step-sec 2.0 \
@@ -352,27 +352,26 @@ jobs:
 
       - name: Generate FSM diagrams
         run: |
-          mkdir -p docs
-          python src/plot_fsm_diagram.py --output-dir docs --format both
+          python src/simulations/ditl/plot_fsm_diagram.py --output-dir src/simulations/ditl --format both
 
       - name: Verify outputs
         run: |
-          test -f docs/fsm_diagram.png
-          test -f docs/fsm_diagram.svg
-          test -f docs/fsm_diagram.mmd
+          test -f src/simulations/ditl/fsm_diagram.png
+          test -f src/simulations/ditl/fsm_diagram.svg
+          test -f src/simulations/ditl/fsm_diagram.mmd
 
           ls -lh \
-            docs/fsm_diagram.png \
-            docs/fsm_diagram.svg \
-            docs/fsm_diagram.mmd
+            src/simulations/ditl/fsm_diagram.png \
+            src/simulations/ditl/fsm_diagram.svg \
+            src/simulations/ditl/fsm_diagram.mmd
 
-          head -20 docs/fsm_diagram.mmd
+          head -20 src/simulations/ditl/fsm_diagram.mmd
 
       - name: Upload diagrams as artifacts
         uses: actions/upload-artifact@v7
         with:
           name: fsm-diagrams
-          path: docs/fsm_diagram.*
+          path: src/simulations/ditl/fsm_diagram.*
           retention-days: 30
           if-no-files-found: error
 
@@ -444,12 +443,12 @@ jobs:
 
       - name: Full leop_24h scenario
         run: |
-          python src/ANTARA_Science_Sim.py --scenario leop_24h
+          python src/simulations/ditl/ANTARA_Science_Sim.py --scenario leop_24h
         timeout-minutes: 30
 
       - name: Full no_leop_24h scenario
         run: |
-          python src/ANTARA_Science_Sim.py --scenario no_leop_24h
+          python src/simulations/ditl/ANTARA_Science_Sim.py --scenario no_leop_24h
         timeout-minutes: 30
 
       - name: Full leop_1yr scenario (with multi-rate)
@@ -457,18 +456,18 @@ jobs:
           # Step timeout-minutes is capped at 360 by Actions. GNU timeout
           # supplies a bounded 20-hour window inside the 23-hour job instead.
           timeout --signal=INT --kill-after=5m 20h \
-            python -u src/ANTARA_Science_Sim.py --scenario leop_1yr
+            python -u src/simulations/ditl/ANTARA_Science_Sim.py --scenario leop_1yr
 
       - name: LEOP Detumble MC (n_trials=5000)
         run: |
-          python src/leop_detumble_mc.py \
+          python src/simulations/detumble/leop_detumble_mc.py \
             --n-trials 5000 \
             --output detumble_mc_results.pkl
         timeout-minutes: 60
 
       - name: Analyze MC results
         run: |
-          python src/analyze_detumble_mc.py \
+          python src/simulations/detumble/analyze_detumble_mc.py \
             detumble_mc_results.pkl \
             --output-dir detumble_analysis
 
@@ -479,7 +478,7 @@ jobs:
 
       - name: Scenario comparison
         run: |
-          python src/compare_scenarios.py \
+          python src/simulations/ditl/compare_scenarios.py \
             --require-all \
             --require-full-duration \
             --results-dir results/science \
@@ -504,7 +503,7 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: nightly-fsm-diagrams
-          path: docs/fsm_diagram.*
+          path: src/simulations/ditl/fsm_diagram.*
           retention-days: 90
           if-no-files-found: warn
 

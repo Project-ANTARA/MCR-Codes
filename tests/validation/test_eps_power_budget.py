@@ -18,7 +18,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / "src"))
 
 import json
-from antara_models import MissionConfig
+from simulations.helper.antara_models import MissionConfig
 
 
 def main():

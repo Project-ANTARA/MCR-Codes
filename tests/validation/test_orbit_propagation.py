@@ -33,7 +33,7 @@ from org.orekit.utils import Constants, IERSConventions
 from org.orekit.propagation.numerical import NumericalPropagator
 from org.orekit.propagation import SpacecraftState
 from org.orekit.forces.gravity import ThirdBodyAttraction
-from paths import init_orekit_data
+from simulations.helper.paths import init_orekit_data
 from org.orekit.orbits import OrbitType
 from org.hipparchus.ode.nonstiff import DormandPrince853Integrator
 from org.orekit.forces.gravity import HolmesFeatherstoneAttractionModel

@@ -23,7 +23,7 @@ import numpy as np
 from spacepy import coordinates, irbempy, time
 
 # IGRF model from ANTARA_Science_Sim
-from ANTARA_Science_Sim import IGRFModel
+from simulations.ditl.ANTARA_Science_Sim import IGRFModel
 
 
 # Retain the original locations and old magnitudes for audit only. The old

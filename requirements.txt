@@ -1,88 +1,30 @@
-# ANTARA Mission Simulation - Python Dependencies
-# ============================================================
-# This file lists all Python packages required to run the ANTARA
-# CubeSat mission simulation codebase.
-#
-# Note on Orekit: Orekit is a Java astrodynamics library accessed via
-# the 'orekit' Python wrapper (JCC-based). The wrapper is NOT available
-# on PyPI as a pre-built wheel. It must be built from source.
-# See INSTALL.md for detailed build instructions.
-#
-# ============================================================
+# ANTARA Python dependencies (excluding the Conda-provided Orekit wrapper)
+# Activate orekit_env first; never install simulation dependencies only in base.
+# Install Orekit through conda-forge, as documented in README.md#quick-start.
+# Java is required. Prepare Orekit data explicitly before running Science Sim:
+# init_orekit_data() locates existing data and does not download by default.
+# CI uses its own activated Micromamba antara environment.
 
 # Core scientific computing stack
 numpy>=1.24.0
 pandas>=2.0.0
 scipy>=1.10.0
 
-# Plotting and visualization
+# Plotting and geometry
 matplotlib>=3.7.0
 cartopy>=0.22.0
 shapely>=2.0.0
 
-# Optional: Skyfield for orbit propagation validation (test only)
+# Supporting orbit studies / validation
 skyfield>=1.45
 
-# FSM diagram generation
+# FSM diagrams (also require the system Graphviz executable)
 graphviz>=0.20.0
 
-# Testing framework
+# Tests
 pytest>=7.0.0
 
-# Science physics backends (install into the same environment as Orekit)
+# Physics backends: same interpreter as Orekit; SpacePy does not enable live AP9.
+# Prefer conda-forge ppigrf in the supported environment setup.
 ppigrf==2.1.0
 spacepy==0.7.0
-
-# ============================================================
-# Orekit Python Wrapper (NOT on PyPI - must build from source)
-# ============================================================
-# Orekit is a Java astrodynamics library. The Python wrapper uses JCC
-# and must be built from source. Pre-built wheels are not available on PyPI.
-#
-# Build instructions:
-# 1. Install Java 11+ and JCC: pip install jcc
-# 2. Clone Orekit: git clone https://gitlab.orekit.org/orekit/orekit.git
-# 3. Build wrapper: cd orekit && python setup.py build_ext --inplace
-# 4. Install: pip install -e .
-#
-# The orekit package provides: import orekit; orekit.initVM()
-# Actual Orekit JARs are downloaded at runtime by init_orekit_data().
-#
-# Java 11+ must be installed separately.
-# ============================================================
-
-# Core scientific computing stack
-numpy>=1.24.0
-pandas>=2.0.0
-scipy>=1.10.0
-
-# Plotting and visualization
-matplotlib>=3.7.0
-cartopy>=0.22.0
-shapely>=2.0.0
-
-# Optional: Skyfield for orbit propagation validation (test only)
-skyfield>=1.45
-
-# FSM diagram generation
-graphviz>=0.20.0
-
-# Testing framework
-pytest>=7.0.0
-
-# ============================================================
-# Note on Java dependency:
-# Orekit is a Java library. You MUST have Java 11+ installed
-# and available in PATH for the orekit Python wrapper to work.
-# The first run will automatically download ~100MB of Orekit
-# data files (ephemeris, atmosphere models, etc.).
-#
-# Ubuntu/Debian: sudo apt-get install default-jre
-# macOS: brew install openjdk@17
-# Windows: Download from https://adoptium.net/
-#
-# ============================================================
-# System dependencies for cartopy (may need system packages):
-# Ubuntu/Debian: sudo apt-get install libgeos-dev libproj-dev
-# macOS: brew install geos proj
-# ============================================================

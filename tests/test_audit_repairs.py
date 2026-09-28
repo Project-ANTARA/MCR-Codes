@@ -7,11 +7,11 @@ import pytest
 import orekit
 
 orekit.initVM()
-from antara_models import ADCSModel, MissionConfig
-import ANTARA_Science_Sim as science
-import leop_detumble_mc as mc
-from compare_scenarios import compute_mode_duty_cycle
-from telemetry_metrics import streaming_summary
+from simulations.helper.antara_models import ADCSModel, MissionConfig
+from simulations.ditl import ANTARA_Science_Sim as science
+from simulations.detumble import leop_detumble_mc as mc
+from simulations.ditl.compare_scenarios import compute_mode_duty_cycle
+from simulations.helper.telemetry_metrics import streaming_summary
 
 
 def test_adcs_motion_and_zero_step():
@@ -98,8 +98,24 @@ def test_time_weights_and_streaming_chunks(tmp_path):
     assert result["metrics"]["battery_wh"]["max"] == 30.
 
 
+def test_thermal_view_factor_matches_explicit_trapezoidal_sum():
+    from simulations.thermal.ThermalSimulator import ThermalSimulator, ThermalMissionConfig
+    sim = ThermalSimulator.__new__(ThermalSimulator)
+    sim.config = ThermalMissionConfig()
+    sim._build_earth_view_factor_table(phi_resolution_deg=30., alpha_samples=200, beta_samples=200)
+    alpha = np.linspace(1e-6, sim._nominal_earth_angular_radius_rad(), 200)
+    beta = np.linspace(0., 2. * np.pi, 200, endpoint=False)
+    expected = []
+    for phi in np.radians(sim._view_factor_phi_deg):
+        cosine = (np.cos(phi) * np.cos(alpha)[:, None]
+                  + np.sin(phi) * np.sin(alpha)[:, None] * np.cos(beta)[None, :])
+        inner = (np.clip(cosine, 0., None) * np.sin(alpha)[:, None]).sum(axis=1) * (beta[1] - beta[0])
+        expected.append(np.sum(np.diff(alpha) * (inner[1:] + inner[:-1]) / 2.) / np.pi)
+    np.testing.assert_allclose(sim._view_factor_table, expected, rtol=1e-14, atol=1e-15)
+
+
 def test_thermal_exact_horizon():
-    from ThermalSimulator import ThermalSimulator, ThermalMissionConfig
+    from simulations.thermal.ThermalSimulator import ThermalSimulator, ThermalMissionConfig
     sim = ThermalSimulator(ThermalMissionConfig(sim_duration_hours=5/3600, step_sec=2.))
     initial = sim.temperatures_k.copy()
     original = sim._rk4_thermal_step
@@ -123,7 +139,7 @@ def test_saa_entry_credits_first_packet():
 
 
 def test_master_refuses_unfinished_slew():
-    import ANTARA_Master as master
+    from simulations.legacy import ANTARA_Master as master
     sim = master.ANTARASimulator.__new__(master.ANTARASimulator)
     sim.fsm = SimpleNamespace(current_mode="SLEWING")
     sim.adcs = SimpleNamespace(saturation_hold_active=False, is_slewing=True, settling=False)
@@ -131,7 +147,7 @@ def test_master_refuses_unfinished_slew():
 
 
 def test_downloaded_orekit_data_is_discoverable(monkeypatch, tmp_path):
-    import paths
+    from simulations.helper import paths
     data = tmp_path / "data"
     data.mkdir()
     archive = data / "orekit-data.zip"
@@ -188,7 +204,7 @@ def test_first_detection_sample_survives_entry(monkeypatch, tmp_path, duration_s
 def test_legacy_energy_balance_without_launching_study(name, target):
     import ast
     from pathlib import Path
-    tree = ast.parse((Path(science.__file__).parent / name).read_text())
+    tree = ast.parse((Path(__file__).resolve().parents[1] / "src/simulations/power" / name).read_text())
     expressions = []
     for node in ast.walk(tree):
         if isinstance(node, ast.Assign) and any(isinstance(t, ast.Name) and t.id == target for t in node.targets):
@@ -240,9 +256,9 @@ def test_checkpoint_mid_detection_conserves_pending_packets(monkeypatch, tmp_pat
                                   np.array([0., 0., 1.]), np.array([-1., 2., -3.])])
 def test_slew_torque_body_frame_and_diagnostic_independence(implementation, axis):
     if implementation == "master":
-        import ANTARA_Master as model
+        from simulations.legacy import ANTARA_Master as model
     else:
-        import antara_models as model
+        from simulations.helper import antara_models as model
     adcs = model.ADCSModel(model.MissionConfig())
     axis = axis / np.linalg.norm(axis)
     initial = adcs.quaternion_from_axis_angle(np.array([0., 1., 0.]), 57.)

@@ -107,10 +107,10 @@ def test_cli_checkpoint_resumes_in_another_process(tmp_path):
     source_dir = Path(__file__).resolve().parents[1] / "src"
     script = (
         f"import sys; sys.path.insert(0, {str(source_dir)!r}); "
-        "import paths,runpy; from pathlib import Path; "
+        "from simulations.helper import paths; import runpy; from pathlib import Path; "
         f"paths.RESULTS_DIR=Path({str(root)!r}); "
         "sys.argv=['ANTARA_Science_Sim.py']+sys.argv[1:]; "
-        "runpy.run_path('src/ANTARA_Science_Sim.py',run_name='__main__')"
+        "runpy.run_path('src/simulations/ditl/ANTARA_Science_Sim.py',run_name='__main__')"
     )
     subprocess.run([sys.executable, "-c", script, "--duration-hours", str(6/3600),
                     "--step-sec", "2", "--checkpoint-every-hours", str(2/3600), "--no-plots"],

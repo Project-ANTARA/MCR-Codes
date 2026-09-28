@@ -27,7 +27,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent / "src"))
 
 import json
 import numpy as np
-from antara_models import MissionConfig
+from simulations.helper.antara_models import MissionConfig
 
 
 def friis_link_budget(elevation_deg: float, config: MissionConfig) -> float:

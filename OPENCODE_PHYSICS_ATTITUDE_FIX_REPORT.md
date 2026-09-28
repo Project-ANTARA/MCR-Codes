@@ -1,6 +1,6 @@
 # ANTARA Physics Dependency + Attitude Fix Report
 
-> Historical dependency/startup repair evidence. Current operational guidance is in the [README](README.md), [Science guide](docs/ANTARA_Science_Sim.md), and [detumble guide](docs/leop_detumble_mc.md). The later [runtime report](docs/SIMULATION_RUNTIME_FIX_REPORT.md) records the 60-hour annual-preset saturation recovery and progress-display verification. The original test counts and captured commands below are preserved; they are not the current total regression count or proof of a full-year/hosted-CI run.
+> Historical dependency/startup repair evidence. Current operational guidance is in the [README](README.md), [Science guide](src/simulations/ditl/ANTARA_Science_Sim.md), and [detumble guide](src/simulations/detumble/leop_detumble_mc.md). The later [runtime report](src/simulations/ditl/SIMULATION_RUNTIME_FIX_REPORT.md) records the 60-hour annual-preset saturation recovery and progress-display verification. The original test counts and captured commands below are preserved; they are not the current total regression count or proof of a full-year/hosted-CI run.
 
 ## 1. Executive Summary
 

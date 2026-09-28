@@ -2,8 +2,8 @@
 import numpy as np
 import pandas as pd
 import pytest
-from wheel_dynamics import integrate_wheel_profile
-from antara_models import ADCSModel, MissionConfig
+from simulations.helper.wheel_dynamics import integrate_wheel_profile
+from simulations.helper.antara_models import ADCSModel, MissionConfig
 
 
 def test_profile_detects_hidden_peak_and_zero_crossing():
@@ -23,7 +23,7 @@ def test_capacity_event_shortens_motion_and_activates_hold(implementation):
     if implementation == "master":
         import orekit
         orekit.initVM()
-        import ANTARA_Master as model
+        from simulations.legacy import ANTARA_Master as model
         adcs = model.ADCSModel(model.MissionConfig(wheel_max_momentum_nms=.003))
     else:
         adcs = ADCSModel(MissionConfig(wheel_max_momentum_nms=.003))
@@ -94,7 +94,7 @@ def test_science_event_uses_one_common_clock(monkeypatch, tmp_path):
     import orekit
     orekit.initVM()
     import pandas as pd
-    import ANTARA_Science_Sim as science
+    from simulations.ditl import ANTARA_Science_Sim as science
     monkeypatch.setattr(science, "results_path", lambda *parts: tmp_path / parts[-1])
     config = MissionConfig(sim_duration_hours=11./3600., step_sec=11., coarse_step_sec=11.,
                            no_plots=True, wheel_max_momentum_nms=.003)
@@ -131,7 +131,7 @@ def test_checkpoint_at_wheel_event_matches_uninterrupted(monkeypatch, tmp_path):
     orekit.initVM()
     import pandas as pd
     from dataclasses import replace
-    import ANTARA_Science_Sim as science
+    from simulations.ditl import ANTARA_Science_Sim as science
     monkeypatch.setattr(science, "results_path", lambda *parts: tmp_path / parts[-1])
     config = MissionConfig(sim_duration_hours=11./3600., step_sec=11., coarse_step_sec=11.,
                            no_plots=True, wheel_max_momentum_nms=.003, output_tag="event")
@@ -159,7 +159,7 @@ def test_checkpoint_at_wheel_event_matches_uninterrupted(monkeypatch, tmp_path):
 def test_master_event_preserves_total_eps_duration(monkeypatch, tmp_path, capsys):
     import orekit
     orekit.initVM()
-    import ANTARA_Master as master
+    from simulations.legacy import ANTARA_Master as master
     monkeypatch.setattr(master, "results_path", lambda *parts: tmp_path / parts[-1])
     sim = master.ANTARASimulator(master.MissionConfig(sim_duration_hours=11./3600., step_sec=11.,
                                                      wheel_max_momentum_nms=.003))
@@ -216,7 +216,7 @@ def test_master_event_preserves_total_eps_duration(monkeypatch, tmp_path, capsys
 def test_master_partial_final_step_has_exact_end_state(monkeypatch, tmp_path):
     import orekit
     orekit.initVM()
-    import ANTARA_Master as master
+    from simulations.legacy import ANTARA_Master as master
     monkeypatch.setattr(master, "results_path", lambda *parts: tmp_path / parts[-1])
     sim = master.ANTARASimulator(master.MissionConfig(sim_duration_hours=5 / 3600., step_sec=2.))
     monkeypatch.setattr(sim, "_plot_results", lambda *args: None)

@@ -30,8 +30,8 @@ WGS84_EARTH_MU = 3.986004418e14  # m^3/s^2
 
 
 # Import real MissionConfig and run_single_trial
-from antara_models import MissionConfig
-from leop_detumble_mc import run_single_trial, DetumbleTrialResult
+from simulations.helper.antara_models import MissionConfig
+from simulations.detumble.leop_detumble_mc import run_single_trial, DetumbleTrialResult
 
 
 def compute_bdot_time_constant(config: MissionConfig) -> float:

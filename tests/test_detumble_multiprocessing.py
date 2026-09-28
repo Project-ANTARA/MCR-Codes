@@ -15,8 +15,8 @@ import pytest
 
 import numpy as np
 
-import leop_detumble_mc as mc
-from antara_models import MissionConfig
+from simulations.detumble import leop_detumble_mc as mc
+from simulations.helper.antara_models import MissionConfig
 
 
 def test_spawn_matches_serial(monkeypatch):
@@ -48,6 +48,19 @@ def test_cli_pickle_loads_in_another_process(tmp_path):
         results = pickle.load(stream)
     assert len(results) == 3
     assert all(isinstance(result, mc.DetumbleTrialResult) for result in results)
+
+    # Exercise the relocated analyzer, not just its --help path. Preserve the
+    # rate-only reporting path even when all very short trials time out.
+    analysis_dir = tmp_path / "analysis"
+    analysis = subprocess.run([
+        sys.executable, str(Path(mc.__file__).with_name("analyze_detumble_mc.py")),
+        str(output), "--output-dir", str(analysis_dir),
+    ], check=True, capture_output=True, text=True, timeout=60,
+       env=dict(os.environ, MPLBACKEND="Agg"))
+    assert "Total trials: 3" in analysis.stdout
+    assert "Rate-only experiment" in analysis.stdout
+    assert (analysis_dir / "detumble_mc_summary.csv").is_file()
+    assert (analysis_dir / "success_by_rate.png").is_file()
 
 
 @pytest.mark.parametrize('interactive', [False, True])

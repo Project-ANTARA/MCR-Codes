@@ -1,5 +1,10 @@
 # ANTARA Mission Simulation - Implementation Plan (Science Sim Only)
 
+> Historical proposal, superseded. Do not implement the code sketches below as
+> current instructions: checkpointing, execution, detumble sampling and source
+> locations have since changed. See [current status](../../docs/CURRENT_STATUS.md)
+> and [current layout](../../docs/SIMULATION_LAYOUT.md), reconciled 2026-09-28.
+
 ## Overview
 This plan covers 5 stages of enhancements to the **ANTARA Science Simulator** (`src/ANTARA_Science_Sim.py`) only. The Master simulator (`ANTARA_Master.py`) is out of scope.
 

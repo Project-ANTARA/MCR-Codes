@@ -5,8 +5,8 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from compare_scenarios import main as compare_main
-from telemetry_metrics import interval_weights, streaming_summary, weighted_mean, plotting_sample
+from simulations.ditl.compare_scenarios import main as compare_main
+from simulations.helper.telemetry_metrics import interval_weights, streaming_summary, weighted_mean, plotting_sample
 
 
 def telemetry():

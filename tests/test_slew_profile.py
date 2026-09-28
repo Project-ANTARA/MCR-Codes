@@ -4,8 +4,8 @@ import math
 import numpy as np
 import pytest
 
-from slew_profile import slew_step
-from antara_models import ADCSModel, MissionConfig
+from simulations.helper.slew_profile import slew_step
+from simulations.helper.antara_models import ADCSModel, MissionConfig
 
 
 @pytest.mark.parametrize("dt", [.01, .1, 1., 2., 20.])
@@ -118,7 +118,7 @@ def test_hidden_peak_in_zero_net_impulse_slew(capacity, hidden, implementation):
     if implementation == "master":
         import orekit
         orekit.initVM()
-        import ANTARA_Master as model
+        from simulations.legacy import ANTARA_Master as model
         adcs = model.ADCSModel(model.MissionConfig(wheel_max_momentum_nms=capacity))
     else:
         adcs = ADCSModel(MissionConfig(wheel_max_momentum_nms=capacity))

@@ -8,7 +8,7 @@ import pandas as pd
 import pytest
 
 orekit.initVM()
-import ANTARA_Science_Sim as science
+from simulations.ditl import ANTARA_Science_Sim as science
 
 
 @pytest.fixture
@@ -187,7 +187,7 @@ def test_short_relay_acquisition_timestep_convergence(config, tmp_path):
         assert abs(outcomes[2][column] - outcomes[1][column]) < abs(outcomes[1][column] - outcomes[0][column])
 
 
-@pytest.mark.parametrize("module_name", ["ANTARA_Science_Sim", "ANTARA_Master"])
+@pytest.mark.parametrize("module_name", ["simulations.ditl.ANTARA_Science_Sim", "simulations.legacy.ANTARA_Master"])
 def test_eps_uses_interval_slew_fraction(module_name):
     import importlib
     module = importlib.import_module(module_name)

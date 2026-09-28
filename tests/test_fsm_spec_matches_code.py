@@ -17,8 +17,8 @@ import numpy as np
 # Add src to path
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
-from antara_models import SpacecraftFSM, MissionConfig
-from fsm_spec import FSM_SPEC, ALLOWED_TRANSITIONS
+from simulations.helper.antara_models import SpacecraftFSM, MissionConfig
+from simulations.helper.fsm_spec import FSM_SPEC, ALLOWED_TRANSITIONS
 
 
 def make_fsm(config: MissionConfig) -> SpacecraftFSM:

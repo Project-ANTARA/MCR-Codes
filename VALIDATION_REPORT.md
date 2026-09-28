@@ -1,6 +1,6 @@
 # ANTARA Subsystem Validation Report
 
-> Captured subsystem-validation output; preserved during the 2026-09-12 documentation review without rerunning or changing its PASS/FAIL evidence. The [runtime report](docs/SIMULATION_RUNTIME_FIX_REPORT.md) covers separate targeted regressions and a 60-hour Science run. Those results do not override the subsystem failures recorded here. Use the [README](README.md#subsystem-validation-stage-4) for regeneration instructions.
+> Captured subsystem-validation output; preserved during the 2026-09-12 documentation review without rerunning or changing its PASS/FAIL evidence. The [runtime report](src/simulations/ditl/SIMULATION_RUNTIME_FIX_REPORT.md) covers separate targeted regressions and a 60-hour Science run. Those results do not override the subsystem failures recorded here. Use the [README](README.md#subsystem-validation-stage-4) for regeneration instructions.
 
 Generated: 2026-09-12T02:45:34.025420
 Repository: ANTARA CubeSat Mission Simulation

@@ -71,9 +71,9 @@ gh run view 34743815167 --repo Project-ANTARA/MCR-Codes --log-failed
 python tests/validation/test_orbit_propagation.py
 python scripts/generate_validation_report.py --output-dir /tmp/antara-validation-PrqQTR
 python -m pytest tests/test_scheduled_validation.py tests/test_physics_attitude.py tests/test_detumble_multiprocessing.py tests/test_fsm_spec_matches_code.py -q --disable-warnings
-python src/compare_scenarios.py --results-dir results/science --output-dir /tmp/antara-nightly-comparison --require-all
-python src/compare_scenarios.py --results-dir results/science --output-dir /tmp/antara-nightly-duration-check --require-all --require-full-duration
-python -m py_compile scripts/generate_validation_report.py src/compare_scenarios.py tests/test_scheduled_validation.py tests/validation/*.py
+python src/simulations/ditl/compare_scenarios.py --results-dir results/science --output-dir /tmp/antara-nightly-comparison --require-all
+python src/simulations/ditl/compare_scenarios.py --results-dir results/science --output-dir /tmp/antara-nightly-duration-check --require-all --require-full-duration
+python -m py_compile scripts/generate_validation_report.py src/simulations/ditl/compare_scenarios.py tests/test_scheduled_validation.py tests/validation/*.py
 git diff --stat
 git diff --check
 ```

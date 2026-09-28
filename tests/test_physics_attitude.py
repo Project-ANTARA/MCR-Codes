@@ -9,7 +9,7 @@ import ppigrf
 import pytest
 
 orekit.initVM()
-from ANTARA_Science_Sim import (
+from simulations.ditl.ANTARA_Science_Sim import (
     ADCSModel, ANTARAScienceSimulator, IGRFModel, MissionConfig,
     _config_from_args, _parse_args,
 )
@@ -179,7 +179,7 @@ def test_relay_acquisition_preserves_tracking_rate(geometry, valid_seconds, hold
 @pytest.mark.parametrize("holding", [True, False])
 def test_pending_slew_restored_only_after_saturation_release(geometry, monkeypatch, holding):
     from types import SimpleNamespace
-    from ANTARA_Science_Sim import AttitudeCommand
+    from simulations.ditl.ANTARA_Science_Sim import AttitudeCommand
     from org.hipparchus.geometry.euclidean.threed import Vector3D
     sim = geometry
     orbit = SimpleNamespace(sat_position_inertial=Vector3D(0., -7000000., 0.),
@@ -201,7 +201,7 @@ def test_pending_slew_restored_only_after_saturation_release(geometry, monkeypat
 
 def test_saturation_timeout_during_slew_uses_pending_mode_budget(geometry):
     from types import SimpleNamespace
-    from ANTARA_Science_Sim import SpacecraftFSM
+    from simulations.ditl.ANTARA_Science_Sim import SpacecraftFSM
     from org.hipparchus.geometry.euclidean.threed import Vector3D
     sim = geometry
     sim.target_mode = "SUN_POINTING"
@@ -232,7 +232,7 @@ def test_saturation_timeout_during_slew_uses_pending_mode_budget(geometry):
 @pytest.mark.parametrize("repeated_command", [False, True])
 def test_sun_guidance_rejects_stale_out_of_band_target(geometry, monkeypatch, dt, repeated_command):
     from types import SimpleNamespace
-    from ANTARA_Science_Sim import AttitudeCommand
+    from simulations.ditl.ANTARA_Science_Sim import AttitudeCommand
     from org.hipparchus.geometry.euclidean.threed import Vector3D
     sim = geometry
     orbit = SimpleNamespace(sat_position_inertial=Vector3D(0., -7000000., 0.),
@@ -276,7 +276,7 @@ def test_sun_guidance_rejects_stale_out_of_band_target(geometry, monkeypatch, dt
 
 
 def test_multirate_subsystems_advance_once_per_clock_interval(monkeypatch, tmp_path):
-    import ANTARA_Science_Sim as science
+    from simulations.ditl import ANTARA_Science_Sim as science
     import pandas as pd
     monkeypatch.setattr(science, "results_path", lambda *parts: tmp_path / parts[-1])
     sim = ANTARAScienceSimulator(MissionConfig(sim_duration_hours=120./3600., no_plots=True), skip_leop=True)

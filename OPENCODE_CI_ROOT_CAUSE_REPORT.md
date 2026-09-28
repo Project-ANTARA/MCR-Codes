@@ -1,6 +1,6 @@
 # OPENCODE CI ROOT CAUSE REPORT
 
-> Documentation review 2026-09-12: see the [runtime recovery report](docs/SIMULATION_RUNTIME_FIX_REPORT.md) for subsequent RELAY, saturation, and Monte Carlo repairs, and the [current docs index](docs/README.md) for supported commands. No hosted CI rerun is implied by this documentation refresh.
+> Documentation review 2026-09-12: see the [runtime recovery report](src/simulations/ditl/SIMULATION_RUNTIME_FIX_REPORT.md) for subsequent RELAY, saturation, and Monte Carlo repairs, and the [current docs index](docs/README.md) for supported commands. No hosted CI rerun is implied by this documentation refresh.
 
 > Historical investigation, superseded for dependency, CLI, and attitude status by the [physics/attitude repair report](OPENCODE_PHYSICS_ATTITUDE_FIX_REPORT.md). The current CLI supports `--no-plots` and explicit scenario overrides; CI installs ppigrf and SpacePy and verifies their environment. Live AP9 remains unavailable through the current SpacePy interface. Original findings and captured commands below are retained as historical evidence, not current setup instructions or proof of a hosted CI result.
 
