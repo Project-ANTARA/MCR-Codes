@@ -2,6 +2,7 @@
 
 from datetime import datetime
 from types import SimpleNamespace
+import pickle
 
 import numpy as np
 import orekit
@@ -16,6 +17,63 @@ from org.orekit.utils import IERSConventions
 import ANTARA_Science_Sim as science
 from antara_models import ADCSModel, MissionConfig
 from paths import init_orekit_data
+
+
+@pytest.fixture(params=["shared", "master"])
+def wheel_model(request):
+    if request.param == "master":
+        import ANTARA_Master as model
+        return model.ADCSModel(model.MissionConfig())
+    return ADCSModel(MissionConfig())
+
+
+@pytest.mark.parametrize("case", ["nan_torque", "inf_torque", "shape", "negative_dt", "nan_dt",
+                                  "negative_unload", "inf_projection", "negative_field",
+                                  "invalid_inertia", "invalid_capacity", "invalid_recovery",
+                                  "impulse_overflow", "rpm_overflow", "unload_overflow"])
+def test_wheel_failure_is_atomic(wheel_model, case):
+    adcs = wheel_model
+    torque, dt, unload, projection = np.array([1e-4, 0., 0.]), 1., 1., 1.
+    if case == "nan_torque": torque[0] = np.nan
+    elif case == "inf_torque": torque[0] = np.inf
+    elif case == "shape": torque = np.zeros(2)
+    elif case == "negative_dt": dt = -1.
+    elif case == "nan_dt": dt = np.nan
+    elif case == "negative_unload": unload = -1.
+    elif case == "inf_projection": projection = np.inf
+    elif case == "negative_field": adcs.config.earth_B_field_T = -1.
+    elif case == "invalid_inertia": adcs.config.wheel_inertia_kgm2 = 0.
+    elif case == "invalid_capacity": adcs.config.wheel_max_momentum_nms = np.nan
+    elif case == "invalid_recovery": adcs.config.wheel_momentum_recovery_fraction = 1.
+    elif case == "impulse_overflow": torque[0], dt = 1e308, 10.
+    elif case == "rpm_overflow": adcs.config.wheel_inertia_kgm2 = 1e-320
+    elif case == "unload_overflow": unload, projection = 1e308, 1e308
+    before = pickle.dumps(vars(adcs))
+    with pytest.raises((ValueError, FloatingPointError)):
+        adcs.update_wheel_momentum(torque, dt, unload, projection)
+    assert pickle.dumps(vars(adcs)) == before
+
+
+def test_invalid_momentum_cannot_clear_saturation(wheel_model):
+    adcs = wheel_model
+    adcs.wheel_momentum_nms[0] = np.nan
+    adcs.is_saturated = True
+    adcs.saturation_hold_active = True
+    before = pickle.dumps(vars(adcs))
+    with pytest.raises(FloatingPointError):
+        adcs.check_saturation()
+    assert pickle.dumps(vars(adcs)) == before
+
+
+def test_wheel_unloading_and_zero_time(wheel_model):
+    adcs = wheel_model
+    adcs.wheel_momentum_nms[:] = [1e-5, -1e-5, 0.]
+    before = pickle.dumps(vars(adcs))
+    adcs.update_wheel_momentum(np.ones(3), 0., 1., 1.)
+    assert pickle.dumps(vars(adcs)) == before
+    adcs.update_wheel_momentum(np.zeros(3), 100., 1., 1.)
+    np.testing.assert_array_equal(adcs.wheel_momentum_nms, np.zeros(3))
+    np.testing.assert_array_equal(adcs.wheel_speed_rpm_estimate, np.zeros(3))
 
 
 @pytest.mark.parametrize("year,expected", [

@@ -4,6 +4,8 @@ This workspace contains the ANTARA 3U CubeSat mission simulation codebase, organ
 
 ## Current status
 
+September 25 audit repairs change ADCS motion/torque accounting, payload flux response, detumble trial semantics, duration-weighted reporting, and supporting-study integration/energy accounting. See [changes, verification and limits](docs/AUDIT_REPAIRS_2026-09-25.md). Headless Science writes an exact scalar `*_ANTARA_Science_summary.json` without loading the full telemetry into memory. Historical results below retain their original scope; do not compare old payload counts or detumble capability estimates as though model semantics were unchanged.
+
 Documentation reviewed against the working tree on 2026-09-12. Science's annual preset has been verified through **60 hours**, not a full year: 17,758 telemetry rows, successful saturation → SAFE → SUN_POINTING recovery, and a maximum settled, non-held SUN_POINTING error of 4.999973° against the unchanged 5° limit. See the [runtime repair evidence](docs/SIMULATION_RUNTIME_FIX_REPORT.md).
 
 The latest combined physics/attitude, detumble multiprocessing/progress, and shared FSM regression command passed **31 tests** locally. Historical subsystem reports retain their own results and are not superseded by that count.
@@ -99,7 +101,9 @@ python src/ANTARA_Science_Sim.py --scenario no_leop_24h --duration-hours 1 --ste
 
 Explicit CLI values override scenario presets, which override global defaults. An explicit `--step-sec` also sets the coarse step unless `--coarse-step-sec` is supplied separately. Preset-only runs retain multirate stepping. `--no-plots`, RNG, and periphery-merge controls also apply with scenarios.
 
-The verified one-hour runs each produce 1,801 telemetry rows (both endpoints included), spanning `time_sec=0` to `3600` with two-second gaps. Reusing an output tag replaces that scenario's outputs; preserve earlier results before rerunning.
+The verified one-hour runs each produced 1,801 telemetry rows (both endpoints included), spanning `time_sec=0` to `3600` with two-second gaps. Wheel-capacity events can shorten a requested step (`wheel_event_split`); the horizon can also clip the final interval. Reusing an output tag replaces that scenario's outputs; preserve earlier results before rerunning.
+
+The [September 25 execution/payload repair](docs/EXECUTION_PAYLOAD_REPAIR.md) unifies stepped and continuous runs and removes extra endpoint integration. The [September 28 operational checks](docs/SHORT_OPERATIONAL_VERIFICATION.md) follow the [wheel-event repair](WHEEL_EVENT_REPAIR.md) and advance atomic checkpoints to **version 7**: nominal-frame and slew-energy corrections make older physics histories incompatible. Keep the original CSV alongside its checkpoint for separate-file resume. Telemetry exposes interval duration and end-state time, with a zero-duration terminal observation. Verification uses short runs, not annual simulations.
 
 ### Physics backends and limitations
 

@@ -197,7 +197,7 @@ jobs:
           python -m pytest tests/test_fsm_spec_matches_code.py -v --tb=short
 
       - name: Physics and attitude regression tests
-        run: python -m pytest tests/test_physics_attitude.py tests/test_scientific_integrity.py tests/test_detumble_multiprocessing.py tests/test_scheduled_validation.py -v --tb=short
+        run: python -m pytest tests/test_physics_attitude.py tests/test_scientific_integrity.py tests/test_execution_integrity.py tests/test_audit_repairs.py tests/test_slew_profile.py tests/test_wheel_events.py tests/test_telemetry_integrity.py tests/test_checkpoint_roundtrip.py tests/test_detumble_multiprocessing.py tests/test_scheduled_validation.py -v --tb=short
 
       - name: Syntax check validation tests
         run: |
@@ -291,6 +291,7 @@ jobs:
 
           python - <<'PY'
           import pandas as pd
+          import numpy as np
 
           scenario = "${{ matrix.scenario }}"
           path = f"results/science/{scenario}_ANTARA_Science_telemetry.csv"
@@ -304,8 +305,17 @@ jobs:
           assert "mode" in df.columns, "Telemetry is missing required 'mode' column"
 
           elapsed = df["time_sec"] - df["time_sec"].iloc[0]
-          assert 3598 <= elapsed.iloc[-1] <= 3600, elapsed.iloc[-1]
-          assert (elapsed.diff().dropna() == 2.0).all(), "Unexpected telemetry step"
+          assert np.isclose(df.time_sec.iloc[0], 0, rtol=0, atol=1e-7), "Unexpected start time"
+          assert np.isclose(elapsed.iloc[-1], 3600, rtol=0, atol=1e-7), elapsed.iloc[-1]
+          gaps = elapsed.diff().dropna().to_numpy()
+          assert ((gaps > 0) & (gaps <= 2.0 + 1e-9)).all(), "Invalid telemetry interval"
+          assert np.allclose(df.interval_duration_sec.iloc[:-1], gaps, rtol=0, atol=1e-7), "Interval/clock mismatch"
+          assert np.allclose(df.state_time_sec, df.time_sec + df.interval_duration_sec, rtol=0, atol=1e-7), "State/clock mismatch"
+          assert np.isclose(df.interval_duration_sec.sum(), 3600, rtol=0, atol=1e-7), "Incorrect integrated duration"
+          assert df.interval_duration_sec.iloc[-1] == 0, "Terminal row integrated again"
+          short = gaps < 2.0 - 1e-9
+          # Only wheel events or the final horizon clip may shorten fixed stepping.
+          assert (df.wheel_event_split.iloc[:-2].to_numpy() | ~short[:-1]).all(), "Unexplained short interval"
 
           print(f"Modes: {df['mode'].unique()}")
           PY

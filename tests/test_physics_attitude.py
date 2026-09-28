@@ -29,6 +29,31 @@ def test_all_geometric_self_tests(geometry):
     geometry._run_geometric_self_tests()
 
 
+@pytest.mark.parametrize("angle_deg", [1e-8, .01, 179.99])
+def test_operational_angles_resolve_small_and_large_offsets(geometry, monkeypatch, angle_deg):
+    angle = math.radians(angle_deg)
+    sine, cosine = math.sin(angle), math.cos(angle)
+    monkeypatch.setattr(geometry, "_velocity_vector_unit", lambda orbit: np.array([cosine, sine, 0.]))
+    monkeypatch.setattr(geometry, "_ground_station_vector_unit", lambda orbit: np.array([sine, cosine, 0.]))
+    monkeypatch.setattr(geometry, "_sun_vector_unit", lambda orbit: np.array([sine, 0., cosine]))
+    values = [geometry._compute_payload_pointing_error_deg(None),
+              geometry._compute_relay_pointing_error_deg(None, "+Y", True),
+              geometry._compute_gs_off_boresight_deg(None, True),
+              geometry._compute_sun_incidence_angle_deg(None)]
+    np.testing.assert_allclose(values, angle_deg, rtol=1e-10, atol=1e-12)
+    assert geometry._compute_gs_off_boresight_deg(None, False) == 180.
+
+
+@pytest.mark.parametrize("sun_sign", [-1., 1.])
+def test_nominal_frame_never_flips_nadir_for_sun(geometry, monkeypatch, sun_sign):
+    monkeypatch.setattr(geometry, "_velocity_vector_unit", lambda orbit: np.array([1., 0., 0.]))
+    monkeypatch.setattr(geometry, "_nadir_vector_unit", lambda orbit: np.array([0., 1., 0.]))
+    monkeypatch.setattr(geometry, "_orbit_normal_unit", lambda orbit: np.array([0., 0., 1.]))
+    monkeypatch.setattr(geometry, "_sun_vector_unit", lambda orbit: np.array([0., 0., sun_sign]))
+    command = geometry._compute_default_orientation_attitude(None)
+    np.testing.assert_allclose(geometry.adcs.get_body_to_inertial_matrix(command.quaternion), np.eye(3), atol=1e-14)
+
+
 @pytest.mark.parametrize("offset", [0.01, 0.1, 1.0])
 def test_wrong_alignment_rejected(geometry, offset):
     quaternion = geometry.adcs.quaternion_from_axis_angle(np.array([0., 0., 1.]), offset)
@@ -128,6 +153,27 @@ def test_moving_relay_target_can_settle(geometry, monkeypatch):
     monkeypatch.setattr(geometry, "_compute_relay_pointing_error_deg", lambda *args: 10.)
     geometry._update_relay_tracking_settlement(None, True, 2.)
     assert geometry._relay_tracking_valid_sec == 0.
+    assert geometry.adcs.settled_time_sec == 0.
+
+
+@pytest.mark.parametrize("valid_seconds,holding,offset,expected", [
+    (8., False, 0.1, True), (7., False, 0.1, False),
+    (8., True, 0.1, False), (8., False, 1., False),
+])
+def test_relay_acquisition_preserves_tracking_rate(geometry, valid_seconds, holding, offset, expected):
+    from types import SimpleNamespace
+    geometry.target_mode = "RELAY"
+    geometry._relay_tracking_valid_sec = valid_seconds
+    geometry.active_slew_event_index = None
+    geometry.fsm = SimpleNamespace(current_mode="SLEWING",
+                                  ALLOWED_TRANSITIONS={"SLEWING": {"RELAY"}},
+                                  transition=lambda *args: True)
+    geometry.adcs.is_slewing = True
+    geometry.adcs.current_slew_rate_deg_sec = .01
+    geometry.adcs.saturation_hold_active = holding
+    geometry.adcs.target_quaternion = geometry.adcs.quaternion_from_axis_angle(np.array([0., 0., 1.]), offset)
+    assert geometry._complete_slew_transition(100.) is expected
+    assert geometry.adcs.current_slew_rate_deg_sec == .01
 
 
 @pytest.mark.parametrize("holding", [True, False])
@@ -241,13 +287,15 @@ def test_multirate_subsystems_advance_once_per_clock_interval(monkeypatch, tmp_p
     def record_eps(dt):
         eps_steps.append(dt)
         return eps_step(dt)
-    def record_guidance(mode, orbit, sun, gs, battery, dt, time):
-        guidance_steps.append(dt)
-        return guidance(mode, orbit, sun, gs, battery, dt, time)
+    def record_guidance(mode, orbit, sun, gs, battery, dt, time, **kwargs):
+        result = guidance(mode, orbit, sun, gs, battery, dt, time, **kwargs)
+        guidance_steps.append(sim._guidance_interval_sec)
+        return result
     monkeypatch.setattr(sim.eps, "step", record_eps)
     monkeypatch.setattr(sim, "_update_attitude_guidance", record_guidance)
     sim.run()
     df = pd.read_csv(tmp_path / 'ANTARA_Science_telemetry.csv')
     np.testing.assert_array_equal(eps_steps, guidance_steps)
-    np.testing.assert_array_equal(eps_steps[:-1], np.diff(df.time_sec))
+    np.testing.assert_array_equal(eps_steps, np.diff(df.time_sec))
+    assert sum(eps_steps) == sim.time_sec == 120.
     assert max(eps_steps) == sim.config.coarse_step_sec

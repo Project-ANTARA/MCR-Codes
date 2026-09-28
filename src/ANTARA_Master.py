@@ -12,6 +12,9 @@ import numpy as np
 import orekit
 import pandas as pd
 from paths import figures_path, init_orekit_data, results_path
+from antara_models import ADCSModel as SharedADCSModel
+from slew_profile import validate_slew_config
+from telemetry_metrics import interval_weights, weighted_mean
 
 try:
     from orekit import JArray_double
@@ -208,7 +211,7 @@ class MissionConfig:
     inertia_tensor_kgm2: Tuple[float, float, float] = (0.016, 0.016, 0.004)
     bdot_gain: float = 3.0e4
     bdot_handover_rate_deg_sec: float = 2.0
-    wheel_rate_damp_gain: float = 0.01
+    wheel_rate_damp_gain: float = 0.2  # Inertia-scaled damping rate, s^-1.
     detumble_stable_rate_deg_sec: float = 0.5
     earth_b_field_model: str = "dipole"
     large_slew_threshold_deg: float = 60.0
@@ -336,6 +339,7 @@ class ADCSModel:
     def __init__(self, config: MissionConfig) -> None:
         """Initialise ADCS state containers, quaternion state, and running counters."""
 
+        validate_slew_config(config)
         self.config = config
         self.current_quaternion = np.array([1.0, 0.0, 0.0, 0.0], dtype=float)
         self.target_quaternion = np.array([1.0, 0.0, 0.0, 0.0], dtype=float)
@@ -375,7 +379,10 @@ class ADCSModel:
         self.quaternion_continuity_corrections = 0
         self.rejected_micro_slew_commands = 0
         self.last_euler_delta_deg = np.zeros(3, dtype=float)
+        self.last_slew_body_torque_nm = np.zeros(3, dtype=float)
+        self.last_slew_torque_segments = []
         self.current_slew_rate_deg_sec = 0.0
+        self.last_wheel_profile_enabled = False
         self.previous_slew_rate_deg_sec = 0.0
         self.current_angular_accel_deg_sec2 = 0.0
         self.attitude_error_deg = 0.0
@@ -401,15 +408,7 @@ class ADCSModel:
     def _integrate_body_rates(self, torque_vec_nm: np.ndarray, dt_sec: float) -> None:
         """Integrate rigid-body angular rates under the applied body torque."""
 
-        torque_vec_nm = _as_flat_vector(torque_vec_nm)
-        omega_rad_sec = np.radians(self.body_rate_deg_sec)
-        inertia = np.maximum(self.inertia_tensor_kgm2, 1.0e-9)
-        angular_momentum = inertia * omega_rad_sec
-        gyro_term = np.cross(omega_rad_sec, angular_momentum)
-        omega_dot_rad_sec2 = (torque_vec_nm - gyro_term) / inertia
-        self.body_accel_deg_sec2 = np.degrees(omega_dot_rad_sec2)
-        omega_rad_sec = omega_rad_sec + (omega_dot_rad_sec2 * dt_sec)
-        self.body_rate_deg_sec = np.degrees(omega_rad_sec)
+        SharedADCSModel._integrate_body_rates(self, torque_vec_nm, dt_sec)
 
     def _integrate_quaternion_from_body_rates(self, dt_sec: float) -> None:
         """Advance the body-to-inertial quaternion from the current body rates."""
@@ -456,17 +455,15 @@ class ADCSModel:
     def wheel_damp_control(self) -> np.ndarray:
         """Return wheel torque opposing the current body-rate vector."""
 
-        desired_torque = -self.config.wheel_rate_damp_gain * np.radians(self.body_rate_deg_sec)
-        self.current_wheel_damp_torque_nm = np.clip(
-            desired_torque,
-            -self.config.wheel_max_torque_nm,
-            self.config.wheel_max_torque_nm,
-        )
-        return self.current_wheel_damp_torque_nm
+        return SharedADCSModel.wheel_damp_control(self)
 
     def step_detumble(self, b_body_t: np.ndarray, dt_sec: float) -> np.ndarray:
         """Advance the two-stage detumble controller and return wheel torque demand."""
 
+        if not np.all(np.isfinite(b_body_t)) or not np.all(np.isfinite(self.body_rate_deg_sec)):
+            raise ValueError("Detumble field and rates must be finite")
+        if not math.isfinite(dt_sec) or dt_sec < 0:
+            raise ValueError("Detumble timestep must be finite and nonnegative")
         if self.detumble_complete:
             self.current_bdot_torque_nm = np.zeros(3, dtype=float)
             self.current_wheel_damp_torque_nm = np.zeros(3, dtype=float)
@@ -510,6 +507,7 @@ class ADCSModel:
         self,
         previous_quaternion: np.ndarray,
         new_quaternion: np.ndarray,
+        call_site: str = "unspecified",
     ) -> np.ndarray:
         """Flip quaternion sign when needed to avoid double-cover 180 deg artifacts."""
 
@@ -643,7 +641,7 @@ class ADCSModel:
         """Compute slew angle and commanded duration between two scalar-first quaternions."""
 
         delta_quaternion = self.compute_delta_quaternion(previous_quaternion, new_quaternion)
-        angle_deg = math.degrees(2.0 * math.acos(np.clip(abs(delta_quaternion[0]), -1.0, 1.0)))
+        angle_deg = math.degrees(2.0 * math.atan2(np.linalg.norm(delta_quaternion[1:]), abs(delta_quaternion[0])))
         self.attitude_error_deg = angle_deg
 
         delta_matrix = self._quaternion_to_matrix(delta_quaternion)
@@ -710,138 +708,29 @@ class ADCSModel:
         self.is_slewing = self.slew_angle_deg > self.config.pointing_accuracy_deg
         self.settling = False
         self.settling_time_remaining_sec = 0.0
-        self.current_slew_rate_deg_sec = 0.0
+        # A new objective or mode does not instantaneously cancel angular rate.
         return self.is_slewing
 
     def advance(self, dt_sec: float) -> None:
-        """Advance the current attitude toward the target using finite slew-rate and acceleration limits."""
-
-        self.attitude_error_deg, _ = self.compute_slew(self.current_quaternion, self.target_quaternion)
-        if self.attitude_error_deg <= self.config.pointing_accuracy_deg:
-            self.current_quaternion = self.target_quaternion.copy()
-            self.current_slew_rate_deg_sec = 0.0
-            self.current_angular_accel_deg_sec2 = 0.0
-            if self.settling_time_remaining_sec > 0.0:
-                self.settling_time_remaining_sec = max(0.0, self.settling_time_remaining_sec - dt_sec)
-                self.settling = self.settling_time_remaining_sec > 0.0
-                self.settled_time_sec = 0.0
-            else:
-                self.settling = False
-                self.is_slewing = False
-                self.slew_time_remaining_sec = 0.0
-                self.settled_time_sec += dt_sec
-            self._update_quaternion_tuple()
-            return
-
-        self.is_slewing = True
-        self.settled_time_sec = 0.0
-        stopping_angle_deg = (self.current_slew_rate_deg_sec ** 2) / (2.0 * self.config.max_slew_accel_deg_sec2)
-        previous_slew_rate_deg_sec = self.current_slew_rate_deg_sec
-        if self.attitude_error_deg <= stopping_angle_deg:
-            self.current_slew_rate_deg_sec = max(
-                0.0,
-                self.current_slew_rate_deg_sec - (self.config.max_slew_accel_deg_sec2 * dt_sec),
-            )
-        else:
-            self.current_slew_rate_deg_sec = min(
-                self.config.max_slew_rate_deg_sec,
-                self.current_slew_rate_deg_sec + (self.config.max_slew_accel_deg_sec2 * dt_sec),
-            )
-        self.current_angular_accel_deg_sec2 = (
-            (self.current_slew_rate_deg_sec - previous_slew_rate_deg_sec) / dt_sec if dt_sec > 0.0 else 0.0
-        )
-        self.previous_slew_rate_deg_sec = previous_slew_rate_deg_sec
-
-        step_angle_deg = min(
-            self.attitude_error_deg,
-            max(self.config.pointing_accuracy_deg, self.current_slew_rate_deg_sec * dt_sec),
-        )
-        delta_quaternion = self.compute_delta_quaternion(self.current_quaternion, self.target_quaternion)
-        delta_vector = delta_quaternion[1:]
-        delta_vector_norm = float(np.linalg.norm(delta_vector))
-        if delta_vector_norm <= 0.0:
-            self.current_quaternion = self.target_quaternion.copy()
-        else:
-            step_axis_unit = delta_vector / delta_vector_norm
-            step_quaternion = self.quaternion_from_axis_angle(step_axis_unit, step_angle_deg)
-            self.current_quaternion = self._normalize_quaternion(
-                self._quaternion_multiply(step_quaternion, self.current_quaternion)
-            )
-            self.current_quaternion = self._enforce_quaternion_continuity(
-                self.target_quaternion,
-                self.current_quaternion,
-            )
-
-        self.total_slew_time_sec += dt_sec
-        self.attitude_error_deg, self.slew_time_remaining_sec = self.compute_slew(
-            self.current_quaternion,
-            self.target_quaternion,
-        )
-        if self.attitude_error_deg <= self.config.pointing_accuracy_deg:
-            self.current_quaternion = self.target_quaternion.copy()
-            self.is_slewing = False
-            self.settling = True
-            self.settling_time_remaining_sec = self.config.settling_time_sec
-            self.current_slew_rate_deg_sec = 0.0
-            self.current_angular_accel_deg_sec2 = 0.0
-        self._update_quaternion_tuple()
+        """Share the event-resolved kinematic profile with Science."""
+        SharedADCSModel.advance(self, dt_sec)
 
     def estimate_torque_vector(self) -> np.ndarray:
-        """Estimate per-axis wheel torque demand from the latest commanded Euler-angle change."""
-
-        if not self.is_slewing:
+        """Use the same cached body-frame slew accounting as Science."""
+        # Unlike Science, Master historically includes nominal tracking motion.
+        if self.saturation_hold_active:
             return np.zeros(3, dtype=float)
+        return self.last_slew_body_torque_nm.copy()
 
-        axis_sign = np.sign(self.last_euler_delta_deg)
-        accel_fraction = min(
-            1.0,
-            abs(self.current_angular_accel_deg_sec2) / max(self.config.max_slew_accel_deg_sec2, 1.0e-9),
-        )
-        return axis_sign * self.config.wheel_max_torque_nm * accel_fraction
-
-    def update_wheel_momentum(
-        self,
-        torque_vec: np.ndarray,
-        dt_sec: float,
-        unload_scale: float,
-        b_projection_scale: float,
-    ) -> None:
-        """Integrate reaction wheel momentum using the applied body torque.
-
-        Momentum unloading is modelled as a continuous magnetorquer dipole acting against
-        the stored wheel momentum. The unloading rate is proportional to the available
-        magnetic dipole (0.2 A·m² peak) interacting with a representative equatorial B-field
-        (~30 µT at 600 km SSO), giving a peak torque of ~6 µN·m.  This produces a time
-        constant of roughly wheel_max_momentum / peak_torque ≈ 0.0015 / 6e-6 ≈ 250 s,
-        realistic for a 3U CubeSat at this altitude.  The sign always opposes the current
-        stored momentum vector on each axis.
-        """
-        self.wheel_momentum_nms += torque_vec * dt_sec
-
-        # Magnetorquer unloading: continuous bleed opposing stored momentum.
-        # Peak unloading torque per axis (N·m): dipole_Am2 × B_T
-        peak_unload_torque_nm = (
-            self.config.magnetorquer_dipole_Am2
-            * self.config.earth_B_field_T
-            * unload_scale
-            * b_projection_scale
-        )
-        self.current_wheel_unload_torque_nm = peak_unload_torque_nm
-        self.momentum_dump_active = peak_unload_torque_nm > 0.0 and np.any(np.abs(self.wheel_momentum_nms) > 0.0)
-        unload_delta = np.sign(self.wheel_momentum_nms) * peak_unload_torque_nm * dt_sec
-        # Never overshoot zero — clamp so we don't reverse momentum direction
-        self.wheel_momentum_nms = np.where(
-            np.abs(unload_delta) >= np.abs(self.wheel_momentum_nms),
-            0.0,
-            self.wheel_momentum_nms - unload_delta,
-        )
-        wheel_speed_rad_sec = self.wheel_momentum_nms / max(self.config.wheel_inertia_kgm2, 1.0e-12)
-        self.wheel_speed_rpm_estimate = wheel_speed_rad_sec * (60.0 / (2.0 * math.pi))
-        self.check_saturation()
+    def update_wheel_momentum(self, torque_vec, dt_sec, unload_scale, b_projection_scale, *, use_slew_profile=False) -> None:
+        """Use shared atomic wheel accounting while retaining Master recovery policy."""
+        SharedADCSModel.update_wheel_momentum(self, torque_vec, dt_sec, unload_scale, b_projection_scale,
+                                            use_slew_profile=use_slew_profile)
 
     def check_saturation(self) -> bool:
         """Check whether any wheel exceeds the configured momentum capacity."""
 
+        SharedADCSModel._validate_wheel_state(self)
         max_wheel_momentum_abs = float(np.max(np.abs(self.wheel_momentum_nms)))
         previously_saturated = self.is_saturated
         self.is_saturated = max_wheel_momentum_abs >= self.config.wheel_max_momentum_nms
@@ -900,6 +789,11 @@ class ADCSModel:
         self.current_quaternion = normalised_quaternion.copy()
         self.target_quaternion = normalised_quaternion.copy()
         self.attitude_error_deg = 0.0
+        self.last_slew_body_torque_nm = np.zeros(3, dtype=float)
+        self.last_slew_torque_segments = []
+        self.slew_axis_inertial = None
+        self.current_slew_rate_deg_sec = 0.
+        self.current_angular_accel_deg_sec2 = 0.
         self._update_quaternion_tuple()
 
 
@@ -961,7 +855,8 @@ class EPSModel:
         self.solar_generation_w = min(self.solar_generation_w, self.config.max_solar_power_w)
         return self.solar_generation_w
 
-    def compute_load(self, mode: str, adcs_slewing: bool, in_eclipse: bool) -> float:
+    def compute_load(self, mode: str, adcs_slewing: bool, in_eclipse: bool,
+                     *, slew_fraction: Optional[float] = None) -> float:
         """Compute the current spacecraft electrical load for the active mode.
 
         `mode` is always the top-level FSM mode string (e.g. 'SUN_POINTING').
@@ -969,10 +864,14 @@ class EPSModel:
         and are never passed here; they do not change the electrical load budget.
         """
 
+        fraction = float(adcs_slewing) if slew_fraction is None else float(slew_fraction)
+        if not math.isfinite(fraction) or not 0.0 <= fraction <= 1.0:
+            raise ValueError("Slew duty fraction must be finite and within [0, 1]")
         baseline_w = self.config.obc_power_w + self.config.eps_power_w
         if in_eclipse:
             baseline_w += self.config.eclipse_heater_power_w
-        adcs_power_w = self.config.adcs_slew_power_w if adcs_slewing else self.config.adcs_idle_power_w
+        adcs_power_w = self.config.adcs_idle_power_w + fraction * (
+            self.config.adcs_slew_power_w - self.config.adcs_idle_power_w)
         if mode in {"COLD_AND_DARK", "DETUMBLE"}:
             self.load_w = baseline_w
         elif mode == "SAFE":
@@ -1534,6 +1433,7 @@ class TelemetryLogger:
         relay_boresight_vector: np.ndarray,
         gs_los_vector: np.ndarray,
         illumination_fraction: float,
+        interval_duration_sec: float,
     ) -> None:
         """Append one timestep of spacecraft telemetry to the in-memory log."""
 
@@ -1545,6 +1445,8 @@ class TelemetryLogger:
         self.telemetry_rows.append(
             {
                 "time_sec": time_sec,
+                "interval_duration_sec": interval_duration_sec,
+                "state_time_sec": time_sec + interval_duration_sec,
                 "lat_deg": orbit_state.latitude_deg,
                 "lon_deg": orbit_state.longitude_deg,
                 "alt_km": orbit_state.altitude_km,
@@ -2111,7 +2013,8 @@ class ANTARASimulator:
             -1.0,
             1.0,
         )
-        return math.degrees(math.acos(cosine_term))
+        cross_norm = np.linalg.norm(np.cross(self._unit_numpy(first_vector), self._unit_numpy(second_vector)))
+        return math.degrees(math.atan2(cross_norm, cosine_term))
 
     def _maybe_warn(self, warning_key: str, message: str) -> None:
         """Print a warning only once per warning key to avoid flooding the console."""
@@ -2929,12 +2832,31 @@ class ANTARASimulator:
         battery_wh: float,
         dt_sec: float,
         time_sec: float,
+        resolve_wheel_events: bool = False,
     ) -> None:
         """Update the ADCS target, enforce eclipse-hold behavior, and advance attitude dynamics."""
+        self._guidance_interval_sec = dt_sec
+        self.adcs.last_wheel_profile_enabled = False
+
+        def advance_interval(interval):
+            if resolve_wheel_events:
+                interval = SharedADCSModel.advance_limited(
+                    self.adcs, interval, 1.0 if sun_visible else 0.5,
+                    max(0.2, abs(math.sin(math.radians(orbit_state.beta_angle_deg)))),
+                    include_tracking=True)
+            else:
+                self.adcs.advance(interval)
+            self._guidance_interval_sec = interval
+            return interval
+
 
         if mode == "SLEWING":
-            self.adcs.advance(dt_sec)
-            self.adcs.is_slewing = time_sec < self.slew_end_time_sec
+            if not self.adcs.saturation_hold_active:
+                command = self._get_attitude_command(self.target_mode, orbit_state, sun_visible, battery_wh, gs_visible)
+                self.adcs.target_quaternion = self.adcs._normalize_quaternion(command.quaternion)
+                self.adcs.commanded_relay_axis = command.relay_axis_label or "+Y"
+                self.current_attitude_command = command
+            dt_sec = advance_interval(dt_sec)
             self.current_attitude_error_deg = self.adcs.get_pointing_error_deg()
             self.current_sun_incidence_angle_deg = self._compute_sun_incidence_angle_deg(orbit_state)
             self.current_payload_pointing_error_deg = self._compute_payload_pointing_error_deg(orbit_state)
@@ -2955,7 +2877,7 @@ class ANTARASimulator:
                 relay_axis_label=self.adcs.commanded_relay_axis,
                 sun_visible=sun_visible,
             )
-            self.adcs.advance(dt_sec)
+            dt_sec = advance_interval(dt_sec)
             self.current_attitude_error_deg = self.adcs.get_pointing_error_deg()
             self.current_sun_incidence_angle_deg = self._compute_sun_incidence_angle_deg(orbit_state)
             self.current_payload_pointing_error_deg = self._compute_payload_pointing_error_deg(orbit_state)
@@ -3014,7 +2936,7 @@ class ANTARASimulator:
         self.current_attitude_command = command
         self.adcs.commanded_relay_axis = command.relay_axis_label or "+Y"
 
-        self.adcs.advance(dt_sec)
+        dt_sec = advance_interval(dt_sec)
 
         self.current_attitude_error_deg = self.adcs.get_pointing_error_deg()
         self.current_sun_incidence_angle_deg = self._compute_sun_incidence_angle_deg(orbit_state)
@@ -3094,6 +3016,11 @@ class ANTARASimulator:
         """Complete the active slew and transition into the target mode."""
 
         if self.fsm.current_mode != "SLEWING":
+            return False
+        if self.adcs.saturation_hold_active or self.adcs.is_slewing or self.adcs.settling:
+            return False
+        error, _ = self.adcs.compute_slew(self.adcs.current_quaternion, self.adcs.target_quaternion)
+        if error > self.config.pointing_accuracy_deg:
             return False
         target_mode = self.target_mode
         if target_mode not in self.fsm.ALLOWED_TRANSITIONS["SLEWING"]:
@@ -3419,7 +3346,12 @@ class ANTARASimulator:
         """Print the required ANTARA PDR mission summary to the console."""
 
         total_sim_seconds = self.config.sim_duration_hours * 3600.0
-        avg_orbital_period_min = float(np.mean(self.orbital_period_history_min)) if self.orbital_period_history_min else np.nan
+        if "interval_duration_sec" not in telemetry_df:
+            raise ValueError("Master summaries require interval_duration_sec metadata")
+        weights = interval_weights(telemetry_df)
+        if not math.isclose(float(weights.sum()), total_sim_seconds, rel_tol=0., abs_tol=1e-7):
+            raise ValueError("Master telemetry intervals do not cover the configured duration")
+        avg_orbital_period_min = weighted_mean(self.orbital_period_history_min, weights) if self.orbital_period_history_min else np.nan
         total_revolutions = int(total_sim_seconds / (avg_orbital_period_min * 60.0)) if avg_orbital_period_min > 0.0 else 0
         beta_min_deg = float(np.min(self.beta_angle_history_deg)) if self.beta_angle_history_deg else np.nan
         beta_max_deg = float(np.max(self.beta_angle_history_deg)) if self.beta_angle_history_deg else np.nan
@@ -3435,9 +3367,9 @@ class ANTARASimulator:
             axis=1,
         )
         max_wheel_momentum_nms = float(np.max(wheel_momentum_mag)) if len(wheel_momentum_mag) > 0 else 0.0
-        adcs_duty_cycle_percent = 100.0 * (
-            (telemetry_df["slew_angle_deg"] > 0.0) | (telemetry_df["attitude_error_deg"] > self.config.pointing_accuracy_deg)
-        ).mean()
+        adcs_duty_cycle_percent = 100.0 * weighted_mean(
+            (telemetry_df["slew_angle_deg"] > 0.0) | (telemetry_df["attitude_error_deg"] > self.config.pointing_accuracy_deg),
+            weights)
 
         total_saa_passes = len(saa_passes_df)
         total_saa_dwell_hours = float(saa_passes_df["dwell_sec"].sum() / 3600.0) if not saa_passes_df.empty else 0.0
@@ -3455,8 +3387,8 @@ class ANTARASimulator:
 
         min_battery_wh = float(telemetry_df["battery_wh"].min())
         max_battery_wh = float(telemetry_df["battery_wh"].max())
-        avg_solar_generation_w = float(telemetry_df["solar_w"].mean())
-        avg_load_w = float(telemetry_df["load_w"].mean())
+        avg_solar_generation_w = weighted_mean(telemetry_df["solar_w"], weights)
+        avg_load_w = weighted_mean(telemetry_df["load_w"], weights)
         def _infer_adcs_power(row: pd.Series) -> float:
             base_adcs_power_w = row["load_w"] - (self.config.obc_power_w + self.config.eps_power_w)
             if row["mode"] == "DETECTION":
@@ -3465,26 +3397,27 @@ class ANTARASimulator:
                 base_adcs_power_w -= self.config.radio_tx_power_w
             return max(0.0, float(base_adcs_power_w))
 
-        avg_adcs_power_w = float(telemetry_df.apply(_infer_adcs_power, axis=1).mean()) if not telemetry_df.empty else 0.0
-        avg_net_power_w = float((telemetry_df["solar_w"] - telemetry_df["load_w"]).mean())
-        eclipse_fraction_percent = 100.0 * telemetry_df["in_eclipse"].mean()
-        power_positive_fraction_percent = 100.0 * (telemetry_df["solar_w"] > telemetry_df["load_w"]).mean()
-        average_sun_incidence_deg = float(telemetry_df["sun_incidence_angle_deg"].mean())
+        avg_adcs_power_w = weighted_mean(telemetry_df.apply(_infer_adcs_power, axis=1), weights) if not telemetry_df.empty else 0.0
+        avg_net_power_w = weighted_mean(telemetry_df["solar_w"] - telemetry_df["load_w"], weights)
+        eclipse_fraction_percent = 100.0 * weighted_mean(telemetry_df["in_eclipse"], weights)
+        power_positive_fraction_percent = 100.0 * weighted_mean(telemetry_df["solar_w"] > telemetry_df["load_w"], weights)
+        average_sun_incidence_deg = weighted_mean(telemetry_df["sun_incidence_angle_deg"], weights)
         max_sun_incidence_deg = float(telemetry_df["sun_incidence_angle_deg"].max())
         relay_rows = telemetry_df[telemetry_df["mode"] == "RELAY"]
         detection_rows = telemetry_df[telemetry_df["mode"] == "DETECTION"]
         average_relay_pointing_error_deg = (
-            float(relay_rows["relay_pointing_error_deg"].mean()) if not relay_rows.empty else 0.0
+            weighted_mean(relay_rows["relay_pointing_error_deg"], weights.loc[relay_rows.index]) if not relay_rows.empty else 0.0
         )
         average_payload_ram_pointing_error_deg = (
-            float(detection_rows["payload_pointing_error_deg"].mean()) if not detection_rows.empty else 0.0
+            weighted_mean(detection_rows["payload_pointing_error_deg"], weights.loc[detection_rows.index]) if not detection_rows.empty else 0.0
         )
         average_attitude_error_per_mode = (
-            telemetry_df.groupby("mode")["attitude_error_deg"].mean().to_dict()
+            {mode: weighted_mean(group["attitude_error_deg"], weights.loc[group.index])
+             for mode, group in telemetry_df.groupby("mode")}
             if not telemetry_df.empty
             else {}
         )
-        average_wheel_momentum_nms = float(np.mean(wheel_momentum_mag)) if len(wheel_momentum_mag) > 0 else 0.0
+        average_wheel_momentum_nms = weighted_mean(wheel_momentum_mag, weights) if len(wheel_momentum_mag) > 0 else 0.0
 
         sim_duration_label = (
             f"{self.config.sim_duration_hours:.0f}-hour"
@@ -3567,7 +3500,8 @@ class ANTARASimulator:
         if "sun_submode" in telemetry_df.columns:
             print("\nSUN_POINTING Submode Breakdown:")
             for submode_label in [SunSubmode.CHARGING, SunSubmode.PASSIVE, SunSubmode.ECLIPSE]:
-                submode_sec = (telemetry_df["sun_submode"] == submode_label).sum() * self.config.step_sec
+                submode_sec = weights[(telemetry_df["mode"] == "SUN_POINTING") &
+                                      (telemetry_df["sun_submode"] == submode_label)].sum()
                 submode_hours = submode_sec / 3600.0
                 sun_pointing_total_sec = self.fsm.mode_durations_sec["SUN_POINTING"]
                 submode_pct = (
@@ -3625,7 +3559,8 @@ class ANTARASimulator:
         )
 
         time_sec = 0.0
-        while time_sec <= final_time_sec:
+        while time_sec < final_time_sec:
+            step_sec = min(self.config.step_sec, final_time_sec - time_sec)
             self.fsm.set_time(time_sec)
             self.adcs.set_time(time_sec)
             current_mode = self.fsm.current_mode
@@ -3647,10 +3582,10 @@ class ANTARASimulator:
             illumination_fraction = self._update_illumination_fraction(sun_visible, time_sec)
             battery_before_step_wh = self.eps.battery_wh
 
-            if self.fsm.current_mode == "SLEWING" and time_sec >= self.slew_end_time_sec:
-                self._complete_slew_transition(time_sec)
             current_mode = self.fsm.current_mode
 
+            self._guidance_interval_sec = step_sec
+            slew_time_before = self.adcs.total_slew_time_sec
             self._update_attitude_guidance(
                 current_mode,
                 orbit_state,
@@ -3659,7 +3594,18 @@ class ANTARASimulator:
                 self.eps.battery_wh,
                 step_sec,
                 time_sec,
+                resolve_wheel_events=True,
             )
+            step_sec = self._guidance_interval_sec
+            if current_mode != "DETUMBLE":
+                SharedADCSModel.validate_slew_momentum_peak(
+                    self.adcs, step_sec, 1.0 if sun_visible else 0.5,
+                    max(0.2, abs(math.sin(math.radians(orbit_state.beta_angle_deg)))))
+            # Judge completion against the refreshed moving target, not last
+            # interval's line of sight or a timer alone.
+            if self.fsm.current_mode == "SLEWING" and time_sec >= self.slew_end_time_sec:
+                self._complete_slew_transition(time_sec)
+            current_mode = self.fsm.current_mode
             (
                 payload_boresight_inertial,
                 velocity_unit_vector,
@@ -3669,7 +3615,7 @@ class ANTARASimulator:
                 relay_alignment_cosine,
                 gs_off_boresight_deg,
             ) = self._update_alignment_telemetry(orbit_state, gs_visible)
-            # self._validate_attitude_metrics(current_mode, orbit_state, gs_visible)
+            self._validate_attitude_metrics(current_mode, orbit_state, gs_visible)
             startup_allows_charging = current_mode not in {"COLD_AND_DARK", "DETUMBLE"}
             self.eps.compute_solar_power(
                 self.current_sun_incidence_angle_deg,
@@ -3679,6 +3625,8 @@ class ANTARASimulator:
                 current_mode,
                 self.adcs.is_slewing,
                 not sun_visible,
+                slew_fraction=float(np.clip(
+                    (self.adcs.total_slew_time_sec - slew_time_before) / step_sec, 0., 1.)),
             )
 
             science_data_step_mb = 0.0
@@ -3716,7 +3664,7 @@ class ANTARASimulator:
             if relay_link_active:
                 downlinked_step_mb = self.communications.downlink_step(self.science_storage_mb, step_sec)
                 assert downlinked_step_mb > 0.0
-            if gs_visible:
+            if relay_link_active:
                 self.communications.record_contact_time(step_sec)
 
             self._update_storage(science_data_step_mb, downlinked_step_mb)
@@ -3756,7 +3704,9 @@ class ANTARASimulator:
                 torque_vector_nm = self.adcs.estimate_torque_vector()
                 unload_scale = 1.0 if sun_visible else 0.5
                 b_projection_scale = max(0.2, abs(math.sin(math.radians(orbit_state.beta_angle_deg))))
-                self.adcs.update_wheel_momentum(torque_vector_nm, step_sec, unload_scale, b_projection_scale)
+                self.adcs.set_time(time_sec + step_sec)
+                self.adcs.update_wheel_momentum(torque_vector_nm, step_sec, unload_scale, b_projection_scale,
+                                               use_slew_profile=self.adcs.last_wheel_profile_enabled)
 
             self.eps.step(step_sec)
             self.fsm.accumulate_mode_time(step_sec)
@@ -3806,6 +3756,7 @@ class ANTARASimulator:
                 relay_boresight_vector=relay_boresight_vector,
                 gs_los_vector=gs_los_vector,
                 illumination_fraction=illumination_fraction,
+                interval_duration_sec=step_sec,
             )
 
             requested_mode, reason = self.fsm.evaluate(

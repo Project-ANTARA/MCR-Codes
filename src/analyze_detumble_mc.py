@@ -58,6 +58,7 @@ def create_dataframe(results: list) -> pd.DataFrame:
             'time_to_handover_sec': r.time_to_handover_sec,
             'time_to_complete_sec': r.time_to_complete_sec,
             'peak_wheel_momentum_nms': r.peak_wheel_momentum_nms,
+            'failure_reason': getattr(r, 'failure_reason', ''),
         })
     return pd.DataFrame(rows)
 
@@ -118,6 +119,9 @@ def plot_success_heatmap(df: pd.DataFrame, output_dir: Path):
 
 def fit_logistic_regression(df: pd.DataFrame) -> tuple:
     """Fit 2D logistic regression to success data."""
+    if df['accel0_mag'].nunique() < 2 or df['success'].nunique() < 2:
+        print("Skipping 2D fit: acceleration or outcome has no variation.")
+        return None, None
     # Prepare data
     X = np.vstack([df['rate0_mag'].values, df['accel0_mag'].values])
     y = df['success'].astype(float).values
@@ -195,6 +199,9 @@ def plot_contours(df: pd.DataFrame, popt: np.ndarray, output_dir: Path):
 def plot_time_to_complete(df: pd.DataFrame, output_dir: Path):
     """Scatter plot of time_to_complete_sec vs rate0_mag for successes."""
     success_df = df[df['success']].copy()
+    if len(success_df) < 2 or success_df['rate0_mag'].nunique() < 2:
+        print("Skipping completion trend: fewer than two distinct successful rates.")
+        return
 
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6))
 
@@ -245,8 +252,10 @@ def plot_per_axis_breakdown(df: pd.DataFrame, output_dir: Path):
             ax = ax_row[col_idx]
             success_vals = success_df[col].values
             fail_vals = df[~df['success']][col].values
-            ax.hist(success_vals, bins=30, alpha=0.7, label='Success', color='green', density=True)
-            ax.hist(fail_vals, bins=30, alpha=0.7, label='Failure', color='red', density=True)
+            if len(success_vals):
+                ax.hist(success_vals, bins=30, alpha=0.7, label='Success', color='green', density=True)
+            if len(fail_vals):
+                ax.hist(fail_vals, bins=30, alpha=0.7, label='Failure', color='red', density=True)
             ax.set_xlabel(titles[row])
             ax.set_ylabel('Density')
             ax.set_title(f'{col}')
@@ -256,7 +265,6 @@ def plot_per_axis_breakdown(df: pd.DataFrame, output_dir: Path):
     # Add inertia tensor note
     fig.suptitle('Per-Axis Breakdown (Inertia: Ixx=0.016, Iyy=0.016, Izz=0.004 kg·m²)', fontsize=12)
 
-    plt.tight_layout()
     plt.savefig(output_dir / 'per_axis_breakdown.png', dpi=300)
     plt.close()
     print(f"Saved per-axis breakdown to {output_dir / 'per_axis_breakdown.png'}")
@@ -323,11 +331,21 @@ def main():
         config.initial_body_accel_deg_sec2_y,
         config.initial_body_accel_deg_sec2_z,
     ]))
-    print(f"\nCurrent config tip-off: {tipoff_rate:.1f} deg/s, {tipoff_accel:.3f} deg/s²")
+    print(f"\nCurrent config tip-off rate: {tipoff_rate:.1f} deg/s (acceleration is torque-derived)")
 
     # Generate all plots
     print("\nGenerating plots...")
-    plot_success_heatmap(df, output_dir)
+    if df['accel0_mag'].eq(0).all():
+        print("Rate-only experiment: acceleration is derived from torque, not swept.")
+        bins = pd.cut(df['rate0_mag'], np.linspace(0, 60, 31), include_lowest=True)
+        rates = df.groupby(bins, observed=True)['success'].mean()
+        fig, ax = plt.subplots()
+        ax.plot([interval.mid for interval in rates.index], rates.to_numpy(), 'o-')
+        ax.set(xlabel='Initial rate magnitude (deg/s)', ylabel='Success fraction', ylim=(0, 1))
+        fig.savefig(output_dir / 'success_by_rate.png', dpi=150)
+        plt.close(fig)
+    else:
+        plot_success_heatmap(df, output_dir)
     popt, pcov = fit_logistic_regression(df)
     if popt is not None:
         plot_contours(df, popt, output_dir)

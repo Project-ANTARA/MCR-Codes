@@ -6,6 +6,7 @@ import csv
 import math
 import time
 import random
+random = random.Random(42)  # Reproducible study-local generator.
 import numpy as np
 import pandas as pd
 
@@ -519,6 +520,8 @@ for RAAN in RAAN_VALUES:
             1.0,
             BATTERY_EFF_SIGMA
         )
+        while not 0.0 < battery_eff <= 1.0:
+            battery_eff = random.gauss(1.0, BATTERY_EFF_SIGMA)
 
         tracking_sigma = random.uniform(
             3.0,
@@ -803,7 +806,7 @@ for RAAN in RAAN_VALUES:
             delta_energy = (
                 power_net *
                 dt_hr *
-                battery_eff
+                (battery_eff if power_net >= 0.0 else 1.0 / battery_eff)
             )
 
             battery_energy += delta_energy

@@ -1,5 +1,18 @@
 # Scientific-integrity repair record
 
+Current follow-ups, 2026-09-27: [wheel-event repair](../WHEEL_EVENT_REPAIR.md)
+records automatic interval splitting and version-6 checkpoint compatibility;
+[telemetry integrity](TELEMETRY_INTEGRITY_REPAIR.md) adds reporting continuity
+checks. The [slew integration repair](../SLEW_PROFILE_REPAIR.md) retains its
+earlier evidence and remaining physical-model requirements. The backlog
+below is historical; do not read it as a list of unchanged current defects.
+
+Update, 2026-09-25: the next batch unifies execution paths, repairs short-run
+checkpoint continuation and endpoint accounting, and fixes per-bin precision and
+merged histogram consistency. See [execution/payload evidence](EXECUTION_PAYLOAD_REPAIR.md).
+The dated baseline/results below are retained as history; their open execution
+items should be read together with that follow-up, not as the current implementation.
+
 ## Scope and baseline
 
 Date: 2026-09-14. Baseline: `83ae62c2864840359dd1b09a62b4698100962710`,
@@ -97,6 +110,11 @@ The largest independent IRBEM NED-vector difference is **0.349079%**, within
 the unchanged 5% reference-check tolerance.
 
 ## Remaining audit backlog and repair order
+
+September 25 follow-up: [audit repairs](AUDIT_REPAIRS_2026-09-25.md) addresses
+the defects below. This list is retained as historical investigation context,
+not a claim that the original defects remain unchanged. Live AP9, calibrated
+detector physics and full mission acceptance remain explicit limits.
 
 The audit is not exhaustive. These items remain open; do not infer their repair
 from the regression count above.

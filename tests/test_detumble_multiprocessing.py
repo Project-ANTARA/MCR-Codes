@@ -78,7 +78,7 @@ def test_progress_counts_eta_and_terminal_cleanup(monkeypatch, interactive):
     progress.close()
     output = stream.getvalue()
     assert 'Baseline: sim=0.0s BDOT |w|=9.000deg/s' in output
-    assert '100.0% 3/3 | OK=2 Timeout=1 Cap=1' in output
+    assert '100.0% 3/3 | OK=2 Failed=1 Cap=1' in output
     assert output.endswith('\n')
     assert ('\r\033[2K' in output) is interactive
 

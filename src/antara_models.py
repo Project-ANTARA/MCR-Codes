@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import math
+import copy
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
+from slew_profile import slew_step, validate_slew_config
+from wheel_dynamics import integrate_wheel_profile
 
 
 # ─── Type aliases (replace Orekit Vector3D) ──────────────────────────────────────
@@ -257,6 +260,12 @@ class MissionConfig:
     def __post_init__(self) -> None:
         """Fail fast on physically or logically inconsistent configurations."""
         errors: List[str] = []
+        for name, value in vars(self).items():
+            if isinstance(value, (float, int)) and not math.isfinite(value):
+                errors.append(f"{name} must be finite")
+        validate_slew_config(self)
+        if not math.isfinite(self.coarse_step_sec) or self.coarse_step_sec <= 0:
+            errors.append("coarse_step_sec must be finite and positive")
 
         if not (0.0 <= self.eccentricity < 1.0):
             errors.append(f"eccentricity={self.eccentricity} must be in [0, 1)")
@@ -795,7 +804,10 @@ class ADCSModel:
         }
         self.rejected_micro_slew_commands = 0
         self.last_euler_delta_deg = np.zeros(3, dtype=float)
+        self.last_slew_body_torque_nm = np.zeros(3, dtype=float)
+        self.last_slew_torque_segments = []
         self.current_slew_rate_deg_sec = 0.0
+        self.last_wheel_profile_enabled = False
         self.previous_slew_rate_deg_sec = 0.0
         self.current_angular_accel_deg_sec2 = 0.0
         self.attitude_error_deg = 0.0
@@ -842,7 +854,9 @@ class ADCSModel:
             raise FloatingPointError("Non-finite ADCS integration result")
         rate_cap_deg_sec = max(120.0, 10.0 * self.config.max_slew_rate_deg_sec)
         self.body_accel_deg_sec2 = acceleration
-        self.body_rate_deg_sec = np.clip(updated_body_rate_deg_sec, -rate_cap_deg_sec, rate_cap_deg_sec)
+        if np.any(np.abs(updated_body_rate_deg_sec) > rate_cap_deg_sec):
+            raise FloatingPointError("ADCS rate safety bound exceeded; reduce integration timestep")
+        self.body_rate_deg_sec = updated_body_rate_deg_sec
 
     def _integrate_quaternion_from_body_rates(self, dt_sec: float) -> None:
         """Advance the body-to-inertial quaternion from the current body rates.
@@ -1123,7 +1137,7 @@ class ADCSModel:
         """Compute slew angle and commanded duration between two scalar-first quaternions."""
 
         delta_quaternion = self.compute_delta_quaternion(previous_quaternion, new_quaternion)
-        angle_deg = math.degrees(2.0 * math.acos(np.clip(abs(delta_quaternion[0]), -1.0, 1.0)))
+        angle_deg = math.degrees(2.0 * math.atan2(np.linalg.norm(delta_quaternion[1:]), abs(delta_quaternion[0])))
         self.attitude_error_deg = angle_deg
 
         delta_matrix = self._quaternion_to_matrix(delta_quaternion)
@@ -1180,7 +1194,6 @@ class ADCSModel:
             self.attitude_error_deg, _ = self.compute_slew(self.current_quaternion, self.target_quaternion)
             return False
 
-        continuing_slew = self.is_slewing and self.last_commanded_mode == mode
         self.target_quaternion = target_quaternion
         self.last_commanded_mode = mode
         self.last_command_reason = reason
@@ -1191,22 +1204,30 @@ class ADCSModel:
         self.is_slewing = self.slew_angle_deg > self.config.pointing_accuracy_deg
         self.settling = False
         self.settling_time_remaining_sec = 0.0
-        if not continuing_slew:
-            self.current_slew_rate_deg_sec = 0.0
+        # A new objective or mode does not instantaneously cancel angular rate.
         return self.is_slewing
 
     def advance(self, dt_sec: float) -> None:
         """Advance the current attitude toward the target using finite slew-rate and acceleration limits."""
 
+        if not math.isfinite(dt_sec) or dt_sec < 0.0:
+            raise ValueError("ADCS timestep must be finite and nonnegative")
+        self.last_slew_body_torque_nm = np.zeros(3, dtype=float)
+        self.last_slew_torque_segments = []
+        self.last_wheel_profile_enabled = False
+        if dt_sec == 0.0 or self.saturation_hold_active:
+            return
         self.attitude_error_deg, _ = self.compute_slew(self.current_quaternion, self.target_quaternion)
-        if self.attitude_error_deg <= self.config.pointing_accuracy_deg:
-            self.current_quaternion = self.target_quaternion.copy()
+        if self.attitude_error_deg <= self.config.pointing_accuracy_deg and self.current_slew_rate_deg_sec == 0.:
+            # A pointing acceptance band is not permission to teleport to target.
             self.current_slew_rate_deg_sec = 0.0
             self.current_angular_accel_deg_sec2 = 0.0
             if self.settling_time_remaining_sec > 0.0:
+                previous_settling = self.settling_time_remaining_sec
                 self.settling_time_remaining_sec = max(0.0, self.settling_time_remaining_sec - dt_sec)
                 self.settling = self.settling_time_remaining_sec > 0.0
-                self.settled_time_sec = 0.0
+                self.settled_time_sec = max(0., dt_sec - previous_settling)
+                self.is_slewing = False
             else:
                 self.settling = False
                 self.is_slewing = False
@@ -1217,77 +1238,153 @@ class ADCSModel:
 
         self.is_slewing = True
         self.settled_time_sec = 0.0
-        stopping_angle_deg = (self.current_slew_rate_deg_sec ** 2) / (2.0 * self.config.max_slew_accel_deg_sec2)
-        previous_slew_rate_deg_sec = self.current_slew_rate_deg_sec
-        if self.attitude_error_deg <= stopping_angle_deg:
-            self.current_slew_rate_deg_sec = max(
-                0.0,
-                self.current_slew_rate_deg_sec - (self.config.max_slew_accel_deg_sec2 * dt_sec),
-            )
-        else:
-            self.current_slew_rate_deg_sec = min(
-                self.config.max_slew_rate_deg_sec,
-                self.current_slew_rate_deg_sec + (self.config.max_slew_accel_deg_sec2 * dt_sec),
-            )
-        self.current_angular_accel_deg_sec2 = (
-            (self.current_slew_rate_deg_sec - previous_slew_rate_deg_sec) / dt_sec if dt_sec > 0.0 else 0.0
-        )
-        self.previous_slew_rate_deg_sec = previous_slew_rate_deg_sec
-
-        step_angle_deg = min(
-            self.attitude_error_deg,
-            max(self.config.pointing_accuracy_deg, self.current_slew_rate_deg_sec * dt_sec),
-        )
         delta_quaternion = self.compute_delta_quaternion(self.current_quaternion, self.target_quaternion)
         delta_vector = delta_quaternion[1:]
         delta_vector_norm = float(np.linalg.norm(delta_vector))
-        if delta_vector_norm <= 0.0:
-            self.current_quaternion = self.target_quaternion.copy()
-        else:
-            step_axis_unit = delta_vector / delta_vector_norm
-            step_quaternion = self.quaternion_from_axis_angle(step_axis_unit, step_angle_deg)
-            self.current_quaternion = self._normalize_quaternion(
-                self._quaternion_multiply(step_quaternion, self.current_quaternion)
-            )
-            self.current_quaternion = self._enforce_quaternion_continuity(
-                self.target_quaternion,
-                self.current_quaternion,
-                call_site="advance",
-            )
+        previous_axis = getattr(self, "slew_axis_inertial", None)
+        step_axis_unit = (delta_vector / delta_vector_norm if delta_vector_norm > 0.
+                          else previous_axis if previous_axis is not None else np.array([1., 0., 0.]))
+        previous_rate = self.current_slew_rate_deg_sec
+        # Preserve the direction of motion when a target moves behind the bus.
+        # Transverse rates are outside this one-axis kinematic command model.
+        if previous_axis is not None and np.dot(previous_axis, step_axis_unit) < 0.:
+            previous_rate = -previous_rate
+        phases = []
+        step_angle_deg, final_rate, moving_time = slew_step(
+            self.attitude_error_deg, previous_rate, self.config.max_slew_rate_deg_sec,
+            self.config.max_slew_accel_deg_sec2, dt_sec, phases_out=phases)
+        self.previous_slew_rate_deg_sec = previous_rate
+        self.current_slew_rate_deg_sec = abs(final_rate)
+        self.current_angular_accel_deg_sec2 = (final_rate - previous_rate) / dt_sec
+        self.slew_axis_inertial = step_axis_unit * (-1. if final_rate < 0. else 1.)
+        body_axis = self.rotate_inertial_vector_to_body(self.current_quaternion, step_axis_unit)
+        self.last_slew_torque_segments = [
+            (body_axis * accel / self.config.max_slew_accel_deg_sec2 * self.config.wheel_max_torque_nm, duration)
+            for accel, duration in phases]
+        if moving_time < dt_sec:
+            self.last_slew_torque_segments.append((np.zeros(3), dt_sec - moving_time))
+        self.last_slew_body_torque_nm = ADCSModel._slew_torque_from_body_axis(self, body_axis)
+        step_quaternion = self.quaternion_from_axis_angle(step_axis_unit, step_angle_deg)
+        self.current_quaternion = self._normalize_quaternion(
+            self._quaternion_multiply(step_quaternion, self.current_quaternion))
+        self.current_quaternion = self._enforce_quaternion_continuity(
+            self.target_quaternion, self.current_quaternion, call_site="advance")
 
-        self.total_slew_time_sec += dt_sec
+        self.total_slew_time_sec += moving_time
         self.attitude_error_deg, self.slew_time_remaining_sec = self.compute_slew(
             self.current_quaternion,
             self.target_quaternion,
         )
-        if self.attitude_error_deg <= self.config.pointing_accuracy_deg:
-            self.current_quaternion = self.target_quaternion.copy()
+        if self.attitude_error_deg <= self.config.pointing_accuracy_deg and final_rate == 0.:
             self.is_slewing = False
-            self.settling = True
-            self.settling_time_remaining_sec = self.config.settling_time_sec
-            self.current_slew_rate_deg_sec = 0.0
-            self.current_angular_accel_deg_sec2 = 0.0
+            idle_time = dt_sec - moving_time
+            self.settling_time_remaining_sec = max(0., self.config.settling_time_sec - idle_time)
+            self.settling = self.settling_time_remaining_sec > 0.
+            self.settled_time_sec = max(0., idle_time - self.config.settling_time_sec)
         self._update_quaternion_tuple()
 
+    def advance_limited(self, dt_sec, unload_scale, b_projection_scale, *, include_tracking=False):
+        """Preview a slew and stop the real interval at its first wheel event."""
+        ADCSModel._validate_wheel_state(self)
+        eligible = include_tracking or self.last_commanded_mode == "SLEWING"
+        if not eligible or self.saturation_hold_active or dt_sec == 0.:
+            self.advance(dt_sec)
+            return dt_sec
+        if np.any(np.abs(self.wheel_momentum_nms) >= self.config.wheel_max_momentum_nms):
+            self.check_saturation()
+            self.advance(dt_sec)
+            return dt_sec
+        # advance assigns arrays rather than mutating them; only the diagnostic
+        # continuity dictionary needs its own mutable copy on this preview.
+        preview = copy.copy(self)
+        if hasattr(self, "quaternion_continuity_corrections_by_site"):
+            preview.quaternion_continuity_corrections_by_site = self.quaternion_continuity_corrections_by_site.copy()
+        ADCSModel.advance(preview, dt_sec)
+        unload = self.config.magnetorquer_dipole_Am2 * self.config.earth_B_field_T * unload_scale * b_projection_scale
+        _, crossing = integrate_wheel_profile(self.wheel_momentum_nms,
+                                              preview.last_slew_torque_segments, unload,
+                                              self.config.wheel_max_momentum_nms)
+        interval = dt_sec
+        if crossing is not None and crossing < dt_sec:
+            # One representable tick toward the event's far side avoids missing
+            # >= capacity through roundoff; this is not a physical tolerance.
+            interval = min(dt_sec, float(np.nextafter(crossing, math.inf)))
+            if interval <= 0. or self.time_sec + interval == self.time_sec:
+                raise FloatingPointError("Wheel event interval is below clock resolution")
+        self.advance(interval)
+        self.last_wheel_profile_enabled = True
+        return interval
+
     def estimate_torque_vector(self) -> np.ndarray:
-        """Estimate per-axis wheel torque demand from the latest commanded Euler-angle change."""
+        """Return the last interval's cached body torque, immune to diagnostics.
 
-        # ROOT-CAUSE FIX: do not let tiny hold/repointing updates accumulate wheel
-        # momentum unless we are executing an explicit slew command.  The previous
-        # logic kept integrating small continuity-driven attitude updates during
-        # nominal mode refreshes, which slowly saturated the wheels.
-        if not self.is_slewing or self.last_commanded_mode != "SLEWING":
+        Nominal tracking torque remains outside this approximate slew model.
+        A finishing interval still contributes even after is_slewing clears.
+        """
+        if self.last_commanded_mode != "SLEWING" or self.saturation_hold_active:
             return np.zeros(3, dtype=float)
+        return self.last_slew_body_torque_nm.copy()
 
-        if float(np.max(np.abs(self.last_euler_delta_deg))) <= max(self.config.pointing_accuracy_deg, 0.1):
-            return np.zeros(3, dtype=float)
+    def _slew_torque_from_body_axis(self, body_axis: np.ndarray) -> np.ndarray:
+        """Existing signed acceleration-to-torque proxy in the correct frame."""
+        fraction = float(np.clip(self.current_angular_accel_deg_sec2 /
+                                 self.config.max_slew_accel_deg_sec2, -1., 1.))
+        return body_axis * self.config.wheel_max_torque_nm * fraction
 
-        axis_sign = np.sign(self.last_euler_delta_deg)
-        accel_fraction = min(
-            1.0,
-            abs(self.current_angular_accel_deg_sec2) / max(self.config.max_slew_accel_deg_sec2, 1.0e-9),
-        )
-        return axis_sign * self.config.wheel_max_torque_nm * accel_fraction
+    def validate_slew_momentum_peak(self, dt_sec, unload_scale, b_projection_scale):
+        """Reject a hidden within-step capacity crossing before averaging torque.
+
+        Recovery is still the existing endpoint policy. A hidden crossing needs
+        a smaller integration interval; accepting its completed attitude would
+        falsely imply the maneuver was achievable without entering recovery.
+        """
+        if not all(math.isfinite(value) and value >= 0. for value in
+                   (dt_sec, unload_scale, b_projection_scale)):
+            raise ValueError("Wheel peak-check timestep and unloading scales must be finite and nonnegative")
+        if not np.all(np.isfinite(self.wheel_momentum_nms)):
+            raise FloatingPointError("Non-finite wheel momentum before peak check")
+        if self.saturation_hold_active:
+            return
+        segments = getattr(self, "last_slew_torque_segments", [])
+        if not segments:
+            return
+        if not math.isclose(sum(duration for _, duration in segments), dt_sec, abs_tol=1e-10):
+            raise ValueError("Slew torque history does not match the wheel timestep")
+        momentum = self.wheel_momentum_nms.copy()
+        peak = np.abs(momentum).copy()
+        unload = self.config.magnetorquer_dipole_Am2 * self.config.earth_B_field_T * unload_scale * b_projection_scale
+        if not math.isfinite(unload * dt_sec) or unload < 0.:
+            raise FloatingPointError("Invalid unloading bound in wheel peak check")
+        for torque, duration in segments:
+            if not np.all(np.isfinite(torque)) or not math.isfinite(duration) or duration < 0:
+                raise FloatingPointError("Invalid slew torque history")
+            # Conservative no-unload peak bound. Only reject when the lower
+            # bound after maximum possible unloading also reaches capacity.
+            momentum -= torque * duration
+            if not np.all(np.isfinite(momentum)):
+                raise FloatingPointError("Wheel peak integration overflow")
+            peak = np.maximum(peak, np.abs(momentum))
+        max_unload = unload * dt_sec
+        hidden_peak = np.any(peak - max_unload >= self.config.wheel_max_momentum_nms)
+        endpoint_below = np.all(np.abs(momentum) < self.config.wheel_max_momentum_nms)
+        if hidden_peak and endpoint_below:
+            raise FloatingPointError("Slew crosses wheel capacity inside timestep; reduce step_sec to resolve saturation recovery")
+
+    def _validate_wheel_state(self):
+        """Validate actuator state before any momentum/recovery mutation."""
+        momentum = _as_flat_vector(self.wheel_momentum_nms)
+        if not np.all(np.isfinite(momentum)):
+            raise FloatingPointError("Non-finite reaction wheel momentum")
+        for name in ("wheel_inertia_kgm2", "wheel_max_momentum_nms"):
+            value = getattr(self.config, name)
+            if not math.isfinite(value) or value <= 0.:
+                raise ValueError(f"{name} must be finite and positive")
+        fraction = self.config.wheel_momentum_recovery_fraction
+        if not math.isfinite(fraction) or not 0. <= fraction < 1.:
+            raise ValueError("wheel_momentum_recovery_fraction must be finite in [0, 1)")
+        if not math.isfinite(self.time_sec):
+            raise ValueError("Reaction wheel time must be finite")
+        return momentum
 
     def update_wheel_momentum(
         self,
@@ -1295,43 +1392,53 @@ class ADCSModel:
         dt_sec: float,
         unload_scale: float,
         b_projection_scale: float,
+        *, use_slew_profile: bool = False,
     ) -> None:
-        """Integrate reaction wheel momentum using the applied body torque.
+        """Apply bus-reaction impulse and bounded unloading atomically.
 
-        Momentum unloading is modelled as a continuous magnetorquer dipole acting against
-        the stored wheel momentum. The unloading rate is proportional to the available
-        magnetic dipole (0.2 A·m² peak) interacting with a representative equatorial B-field
-        (~30 µT at 600 km SSO), giving a peak torque of ~6 µN·m.  This produces a time
-        constant of roughly wheel_max_momentum / peak_torque ≈ 0.0015 / 6e-6 ≈ 250 s,
-        realistic for a 3U CubeSat at this altitude.  The sign always opposes the current
-        stored momentum vector on each axis.
+        This retains the existing impulse-then-unload approximation. All inputs
+        and derived momentum/RPM must be valid before actuator state is committed.
         """
-        self.wheel_momentum_nms += torque_vec * dt_sec
-
-        # Magnetorquer unloading: continuous bleed opposing stored momentum.
-        # Peak unloading torque per axis (N·m): dipole_Am2 × B_T
-        peak_unload_torque_nm = (
-            self.config.magnetorquer_dipole_Am2
-            * self.config.earth_B_field_T
-            * unload_scale
-            * b_projection_scale
-        )
-        self.current_wheel_unload_torque_nm = peak_unload_torque_nm
-        self.momentum_dump_active = peak_unload_torque_nm > 0.0 and np.any(np.abs(self.wheel_momentum_nms) > 0.0)
-        unload_delta = np.sign(self.wheel_momentum_nms) * peak_unload_torque_nm * dt_sec
-        # Never overshoot zero — clamp so we don't reverse momentum direction
-        self.wheel_momentum_nms = np.where(
-            np.abs(unload_delta) >= np.abs(self.wheel_momentum_nms),
-            0.0,
-            self.wheel_momentum_nms - unload_delta,
-        )
-        wheel_speed_rad_sec = self.wheel_momentum_nms / max(self.config.wheel_inertia_kgm2, 1.0e-12)
-        self.wheel_speed_rpm_estimate = wheel_speed_rad_sec * (60.0 / (2.0 * math.pi))
+        momentum = ADCSModel._validate_wheel_state(self)
+        torque = _as_flat_vector(torque_vec)
+        if not np.all(np.isfinite(torque)):
+            raise ValueError("Wheel torque must be finite")
+        if not all(math.isfinite(value) and value >= 0. for value in
+                   (dt_sec, unload_scale, b_projection_scale,
+                    self.config.magnetorquer_dipole_Am2, self.config.earth_B_field_T)):
+            raise ValueError("Wheel timestep, unloading scales, dipole and field must be finite and nonnegative")
+        if dt_sec == 0.:
+            return
+        with np.errstate(over="raise", invalid="raise", divide="raise"):
+            unload = (self.config.magnetorquer_dipole_Am2 * self.config.earth_B_field_T
+                      * unload_scale * b_projection_scale)
+            if not math.isfinite(unload * dt_sec):
+                raise FloatingPointError("Reaction wheel unloading overflow")
+            driven = momentum - torque * dt_sec
+            unload_delta = np.sign(driven) * unload * dt_sec
+            updated = np.where(np.abs(unload_delta) >= np.abs(driven),
+                               0., driven - unload_delta)
+            if use_slew_profile:
+                segments = self.last_slew_torque_segments or [(np.zeros(3), dt_sec)]
+                if not math.isclose(sum(duration for _, duration in segments), dt_sec, rel_tol=1e-12, abs_tol=1e-12):
+                    raise ValueError("Wheel profile duration mismatch")
+                impulse = sum((np.asarray(value) * duration for value, duration in segments), np.zeros(3))
+                if not np.allclose(impulse, torque * dt_sec, rtol=1e-10, atol=1e-14):
+                    raise ValueError("Wheel profile does not match the supplied mean torque")
+                updated, _ = integrate_wheel_profile(momentum, segments, unload, self.config.wheel_max_momentum_nms)
+            rpm = updated / self.config.wheel_inertia_kgm2 * (60. / (2. * math.pi))
+        if not np.all(np.isfinite(updated)) or not np.all(np.isfinite(rpm)):
+            raise FloatingPointError("Non-finite reaction wheel update")
+        self.wheel_momentum_nms = updated
+        self.wheel_speed_rpm_estimate = rpm
+        self.current_wheel_unload_torque_nm = unload
+        self.momentum_dump_active = unload > 0. and bool(np.any(np.abs(driven) > 0.))
         self.check_saturation()
 
     def check_saturation(self) -> bool:
         """Check whether any wheel exceeds the configured momentum capacity."""
 
+        ADCSModel._validate_wheel_state(self)
         max_wheel_momentum_abs = float(np.max(np.abs(self.wheel_momentum_nms)))
         previously_saturated = self.is_saturated
         self.is_saturated = max_wheel_momentum_abs >= self.config.wheel_max_momentum_nms
@@ -1390,6 +1497,11 @@ class ADCSModel:
         self.current_quaternion = normalised_quaternion.copy()
         self.target_quaternion = normalised_quaternion.copy()
         self.attitude_error_deg = 0.0
+        self.last_slew_body_torque_nm = np.zeros(3, dtype=float)
+        self.last_slew_torque_segments = []
+        self.slew_axis_inertial = None
+        self.current_slew_rate_deg_sec = 0.
+        self.current_angular_accel_deg_sec2 = 0.
         self._update_quaternion_tuple()
 
 

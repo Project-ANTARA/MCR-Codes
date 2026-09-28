@@ -41,6 +41,8 @@ def init_orekit_data(download_if_missing: bool = False) -> Path:
     candidates = [
         PROJECT_ROOT / "orekit-data" / "orekit-data-main",
         PROJECT_ROOT / "orekit-data.zip",
+        DATA_DIR / "orekit-data.zip",
+        DATA_DIR / "orekit" / "orekit-data" / "orekit-data-main",
     ]
 
     for candidate in candidates:
@@ -50,8 +52,7 @@ def init_orekit_data(download_if_missing: bool = False) -> Path:
 
     if not download_if_missing:
         raise FileNotFoundError(
-            "Orekit data not found under data/. Expected "
-            "'data/orekit/orekit-data/orekit-data-main' or 'data/orekit-data.zip'."
+            "Orekit data not found. Searched: " + ", ".join(map(str, candidates))
         )
 
     original_cwd = Path.cwd()

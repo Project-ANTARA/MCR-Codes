@@ -58,7 +58,7 @@ Initializes Orekit data directory for the Orekit VM.
 - **Params**: `download_if_missing` - If True, downloads Orekit data automatically
 - **Returns**: `Path` to the Orekit data directory that was used
 - **Behavior**:
-  1. Checks repository-root `orekit-data/orekit-data-main` and then `orekit-data.zip`
+  1. Checks repository-root `orekit-data/orekit-data-main`, root `orekit-data.zip`, `data/orekit-data.zip`, then `data/orekit/orekit-data/orekit-data-main`
   2. If found, calls `setup_orekit_curdir()` and returns the path
   3. If not found and `download_if_missing=True`: changes to `DATA_DIR`, downloads data via `download_orekit_data_curdir()`, sets up Orekit, returns zip path
   4. If not found and `download_if_missing=False`: raises `FileNotFoundError`
@@ -67,7 +67,7 @@ Initializes Orekit data directory for the Orekit VM.
 ## Internal Logic
 - Uses `Path.resolve()` for absolute, symlink-resolved paths
 - `ensure_dir()` is the single mkdir primitive used by all other helpers
-- `init_orekit_data()` searches two canonical locations before optionally downloading
+- `init_orekit_data()` searches the four locations above before optionally downloading
 - Download temporarily changes CWD to `DATA_DIR` to control where Orekit writes the zip
 
 ## Usage Example
@@ -88,6 +88,6 @@ plot_png = figures_path("thermal", "temperature_profile.png")
 
 ## Notes / TODOs
 - **Orekit data location**: Searches repository-root `orekit-data/orekit-data-main/` or `orekit-data.zip`. Science uses the default call, which does not auto-download.
-- **Download/search mismatch**: `download_if_missing=True` downloads to `data/orekit-data.zip` and loads it for that invocation, but later default calls do not search there. The current missing-data exception also lists stale `data/` paths. Prepare root-level data with `download_orekit_data_curdir()` from the repository root, as shown in the [setup guide](../README.md#orekit-data). This documentation describes the current implementation; no path code was changed.
+- **September 25 repair**: Downloaded `data/orekit-data.zip` is discovered on subsequent default calls. Missing-data errors list the actual searched paths. Existing root-level data takes precedence.
 - **Thread safety**: `init_orekit_data()` changes global CWD temporarily — not thread-safe if called concurrently.
 - **Gitignore**: `results/` and `figures/` are gitignored; `data/orekit/` and `data/orekit-data.zip` are also gitignored per `.gitignore`.

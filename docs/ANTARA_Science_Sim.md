@@ -38,9 +38,15 @@ The shared ADCS rejects non-finite body rates, fields, torques and invalid times
 
 ### Proton environment and AP9 limitation
 
+Histogram acquisition and packet serialization are distinct: accepted counts may
+accumulate for several steps before `science_data_mb` becomes positive. SAA exit
+and horizon flushes are included in the SAA pass's packet-volume total. The
+zero-science diagnostic tests accepted counts, not packet bytes. September 26
+regressions cover both closure paths and restart with pending counts.
+
 `ProtonEnvironmentModel(config, saa_polygon)` provides `get_ap9_flux(lat_deg, lon_deg, alt_km)` and `compute_flux(...)`. The latter combines the baseline with SAA depth, magnetic pitch angle, east-west asymmetry, storm scaling, and detector response.
 
-SpacePy's `get_AEP8` supports AE8/AP8, **not AP9**. The current AP9 call also uses an invalid `irbem.Coords` lookup and unsupported keyword arguments. It returns the configured `ap9_baseline_flux` after failure and emits one explanatory warning per model instance. Missing SpacePy also selects that baseline. This baseline feeds primary simulated flux, not just comparison plots.
+SpacePy's `get_AEP8` supports AE8/AP8, **not AP9**. The legacy `get_ap9_flux()` accessor now explicitly returns `ap9_baseline_flux` and warns once; it does not attempt an unsupported backend call. The environment spectrum feeds detector counts through linear energy interpolation onto detector bin centers. The achieved +X payload boresight supplies the directional look vector. The `ap9_flux` output key remains a compatibility name for baseline flux, not independent AP9 measurements. See [September 25 repairs](AUDIT_REPAIRS_2026-09-25.md).
 
 `scripts/verify_physics_dependencies.py` verifies an actual IRBEM/AP8 query; it does not validate live AP9. The SpacePy `ae9ap9` module reads model output files rather than running AP9. Do not interpret successful SpacePy imports as AP9 model availability.
 
@@ -75,7 +81,9 @@ python src/ANTARA_Science_Sim.py --scenario leop_1yr --step-sec 2 --coarse-step-
 
 RAAN and battery capacity are configuration fields, not `--raan-deg` or `--battery-wh` CLI options. There are no `--output-dir` or `--save-pickle` options. Configure `output_tag` through `MissionConfig` when constructing runs programmatically. Only resume trusted checkpoint files.
 
-Checkpoint CLI switches exist, but `run()` currently initializes its loop clock to zero; exact continuation has not been verified. Do not rely on checkpoint/resume to preserve annual-run chronology without testing it. See [scenario and output guidance](scenarios.md). The detumble progress bar belongs to the separate [Monte Carlo runner](leop_detumble_mc.md); Science retains its periodic `[Progress]` lines.
+`run()` and `run_steps(n)` share the production integration loop and continue from the saved clock. Checkpoints are written synchronously at completed intervals, on **simulated-time** deadlines, under `results/checkpoints/`. Writes are atomic. Current **version-7** snapshots retain pending commands, settlement, payload counters/buffers, event histories and RNG state; Orekit objects are reconstructed. Older snapshots are rejected: September 28 nominal-frame and slew-energy corrections invalidate prior physics histories. Retain the original telemetry CSV: the checkpoint verifies and copies its saved byte prefix into a separate resume-tagged file, leaving the original untouched. Do not combine `--resume-from` with scenario/duration/step/seed overrides; it uses the saved configuration (`--no-plots` is allowed).
+
+Older unversioned pickle and JSON/NPZ checkpoints lack required state and are rejected explicitly. Never load untrusted pickle files. Short uninterrupted/segmented/resumed comparisons are tested; annual resume accuracy, cost and memory use are not established. See [execution verification](EXECUTION_PAYLOAD_REPAIR.md) and [scenario guidance](scenarios.md). Science retains its periodic `[Progress]` lines.
 
 ## Attitude geometry
 
@@ -101,6 +109,8 @@ Wheel saturation intentionally freezes inertial attitude while unloading. It can
 
 Startup (including DETUMBLE), SLEWING, DETECTION, and RELAY use the fine cadence. Other modes may use the coarse interval. Each iteration uses the same selected interval for dynamics, EPS, payload, mode-time accumulation, and the simulation clock; EPS is advanced once. This corrects the former 20-second clock/2-second detumble mismatch and duplicate battery update.
 
+Slew intervals now stop at the first predicted wheel-capacity crossing. A disposable ADCS preview determines the boundary; real dynamics advance once, and wheel drive/unloading are integrated per phase. `wheel_event_split=True` marks shortened intervals; `state_time_sec` gives their endpoint. Thus even fixed stepping specifies a maximum, with shorter wheel-event or horizon intervals permitted. Existing saturation hold/recovery rules remain unchanged. See [verification and model limits](../WHEEL_EVENT_REPAIR.md).
+
 The earlier 14-test result below records the dependency repair. The current regression suite additionally covers moving-target settling, slew completion, timestep accounting, and multiprocessing; see [runtime repair verification](SIMULATION_RUNTIME_FIX_REPORT.md).
 
 Paths are routed through [paths.py](paths.md). Prepare root-level Orekit data before constructing the simulator. Scenario outputs use `results/science/<tag>_ANTARA_Science_<name>.csv`, with names:
@@ -111,6 +121,22 @@ Paths are routed through [paths.py](paths.md). Prepare root-level Orekit data be
 Without an output tag, the prefix is simply `ANTARA_Science_`. Plots use `figures/science/` and are skipped by `--no-plots`. Reusing a tag overwrites earlier outputs.
 
 Telemetry uses elapsed `time_sec`; derive absolute timestamps from the configured start date. The verified one-hour runs produced 1,801 rows from 0 through 3600 seconds inclusive, at exactly two-second intervals. Neither entered DETECTION, so they establish startup/run completion rather than SAA science fidelity.
+
+Since the September 25 repair, interval rows explicitly carry `interval_duration_sec` and `state_time_sec`: geometry/mode are sampled at `time_sec`, while integrated subsystem state is at the interval end (`state_time_sec`). The last row is an observation with `terminal_snapshot=True` and zero duration, not another integration step. Ignore it for sample-based detector statistics and weight interval statistics by duration. Any final pending histogram flush is included in that row's data/storage totals. The CSV is not rewritten during finalization, preserving checkpoint prefix integrity.
+
+Reporting now validates timestamp monotonicity, duration/gap agreement and end-state times, including continuity across streaming chunks. A truncated file lacking its zero-duration final observation cannot produce a completed streaming summary. These checks detect inconsistent accounting, not incorrect physical calibration; see [telemetry integrity](TELEMETRY_INTEGRITY_REPAIR.md).
+
+Numeric scalar summaries reject infinite values. Missing samples are excluded from the mean, with `valid_duration_sec`, `missing_duration_sec` and `missing_rows` reported per metric. All-missing metrics have null mean/min/max. Terminal observations can affect extrema and missing-row counts but carry no duration weight. Check coverage before treating an average as representative of the complete run.
+
+Streaming summaries explicitly exclude the declared textual/vector fields and strictly parse the remaining scalar columns. Malformed scalar text raises an error naming the column instead of disappearing from statistics. Numeric-looking cell IDs remain metadata; nullable boolean measurements retain their duration coverage regardless of CSV chunk boundaries. New text/vector telemetry fields must be registered in `SCIENCE_NONSCALAR_COLUMNS` in `telemetry_metrics.py`.
+
+Display decimation selects up to 5,000 globally spaced row indices, retaining the
+first and last row. Two bounded CSV passes prevent the former bias toward recent
+chunks. This spacing is by row, not elapsed time; short events and extrema may
+still be absent from a figure. Use complete telemetry and summary metrics for
+scientific conclusions. Sampling requires a completed, unchanged input file.
+
+Payload precision estimates use each archived bin's accumulated expected count (`1/sqrt(max(N_bin, 1))`), not a common pooled count. The floor represents a conservative reporting convention for empty/low-count bins, not an exact low-count confidence interval. Periphery merging now precedes both mission-histogram and packet accumulation. Counts remain deterministic expected counts; neither stochastic detector realization nor absolute radiation calibration is established by these fixes.
 
 ```bash
 PYTHONPATH=src python -m pytest tests/test_physics_attitude.py tests/test_detumble_multiprocessing.py tests/test_fsm_spec_matches_code.py -v

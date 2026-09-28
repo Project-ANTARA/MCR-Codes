@@ -111,7 +111,7 @@ def lifetime(area, start_alt_m):
         if alt < END_ALT:
             return state.getDate().durationFrom(start_date)
 
-    return max_days * step
+    return float('inf')  # Right-censored: threshold not reached within 30 years.
 
 # ==================================================
 # ALTITUDE SWEEP
@@ -136,4 +136,4 @@ for name, area in areas.items():
     for h in altitudes_km:
         T = lifetime(area, h * 1000.0)
         years = T / (365.25 * 86400.0)
-        print(f"{h:<8d} | {years:5.2f}")
+        print(f"{h:<8d} | {years:5.2f}" if math.isfinite(years) else f"{h:<8d} | >30 (censored)")

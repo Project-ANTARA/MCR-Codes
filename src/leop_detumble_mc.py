@@ -3,7 +3,7 @@
 
 Runs synthetic detumble trials using only ADCSModel and MissionConfig
 (no Orekit, no full simulator). Measures capability envelope for
-tip-off rate/accel combinations.
+tip-off rate combinations. Acceleration is derived from torque, not sampled.
 """
 
 from __future__ import annotations
@@ -37,6 +37,7 @@ class DetumbleTrialResult:
     time_to_handover_sec: float
     time_to_complete_sec: float
     peak_wheel_momentum_nms: float
+    failure_reason: str = ""
 
 
 # Expose rate cap from ADCSModel._integrate_body_rates
@@ -79,7 +80,7 @@ class _TrialProgress:
             eta = '00:00:00'
         text = (f"Detumble [{'#' * filled}{'-' * (16 - filled)}] {100*fraction:5.1f}% "
                 f"{self.done}/{self.total} | OK={self.successes} "
-                f"Timeout={self.done-self.successes} Cap={self.capped} | "
+                f"Failed={self.done-self.successes} Cap={self.capped} | "
                 f"Elapsed={_duration(now-self.started)} ETA~{eta}")
         if detail:
             text += f" | {detail}"
@@ -153,7 +154,7 @@ def run_single_trial(
 
     Args:
         rate0: Initial body rates [deg/s] (x, y, z)
-        accel0: Initial body accelerations [deg/s^2] (x, y, z)
+        accel0: Legacy vector argument; must be zero (acceleration follows torque)
         config: MissionConfig for ADCSModel
         dt_sec: Timestep for detumble loop
         timeout_sec: Maximum simulation time before giving up
@@ -162,6 +163,16 @@ def run_single_trial(
     Returns:
         DetumbleTrialResult with trial metrics
     """
+    if not math.isfinite(dt_sec) or dt_sec <= 0.0:
+        raise ValueError("dt_sec must be finite and positive")
+    if not math.isfinite(timeout_sec) or timeout_sec <= 0.0:
+        raise ValueError("timeout_sec must be finite and positive")
+    rate0 = np.asarray(rate0, dtype=float)
+    accel0 = np.asarray(accel0, dtype=float)
+    if rate0.shape != (3,) or accel0.shape != (3,) or not np.all(np.isfinite([rate0, accel0])):
+        raise ValueError("Initial vectors must contain three finite components")
+    if np.any(accel0 != 0.0):
+        raise ValueError("Initial acceleration is not an independent rigid-body state; supply zero. A disturbance requires a torque/time model.")
     adcs = ADCSModel(config)
     adcs.body_rate_deg_sec = rate0.copy()
     adcs.body_accel_deg_sec2 = accel0.copy()
@@ -174,6 +185,7 @@ def run_single_trial(
     time_to_complete_sec = 0.0
     peak_wheel_momentum_nms = 0.0
     handover_done = False
+    failure_reason = ""
 
     # B-field magnitude for synthetic model
     b_mag = config.earth_B_field_T
@@ -206,11 +218,24 @@ def run_single_trial(
 
         # Step detumble physics
         b_body = synthetic_b_body(adcs, t_sec, b_mag, orbital_period_sec)
-        adcs.step_detumble(b_body, dt_sec)
+        interval = min(dt_sec, timeout_sec - t_sec)
+        try:
+            wheel_torque = adcs.step_detumble(b_body, interval)
+            adcs.update_wheel_momentum(wheel_torque, interval, unload_scale=0.0, b_projection_scale=0.0)
+        except FloatingPointError as exc:
+            hit_rate_cap = True
+            failure_reason = str(exc)
+            break
+        peak_wheel_momentum_nms = max(peak_wheel_momentum_nms, float(np.linalg.norm(adcs.wheel_momentum_nms)))
+        t_sec += interval
+        if np.any(np.abs(adcs.wheel_momentum_nms) >= config.wheel_max_momentum_nms):
+            failure_reason = "Wheel momentum capacity exceeded"
+            break
+        if adcs.detumble_complete:
+            time_to_complete_sec = t_sec
+            break
 
-        t_sec += dt_sec
-
-    success = adcs.detumble_complete and t_sec < timeout_sec
+    success = adcs.detumble_complete and not failure_reason and t_sec <= timeout_sec
     if not adcs.detumble_complete:
         time_to_complete_sec = float('inf')
 
@@ -224,6 +249,7 @@ def run_single_trial(
         time_to_handover_sec=time_to_handover_sec,
         time_to_complete_sec=time_to_complete_sec if success else float('inf'),
         peak_wheel_momentum_nms=peak_wheel_momentum_nms,
+        failure_reason=failure_reason,
     )
 
 
@@ -252,16 +278,20 @@ def run_monte_carlo(
     """
     if n_trials < 1:
         raise ValueError("n_trials must include at least the baseline trial")
+    if not math.isfinite(dt_sec) or dt_sec <= 0.0:
+        raise ValueError("dt_sec must be finite and positive")
+    if timeout_sec is not None and (not math.isfinite(timeout_sec) or timeout_sec <= 0.0):
+        raise ValueError("timeout_sec must be finite and positive")
+    if n_workers is not None and n_workers < 1:
+        raise ValueError("n_workers must be positive")
 
     rng = np.random.default_rng(seed)
 
     # Sample rate0 magnitude ~Uniform(0, 60) deg/s, direction uniform on sphere
-    # Sample accel0 magnitude ~Uniform(0, 1.0) deg/s^2, direction uniform on sphere
-    # (Assumption: accel bound pending real deployer tip-off data)
+    # Acceleration is derived from torque, not independently sampled.
     tasks = []
     for i in range(n_trials):
         rate0_mag = rng.uniform(0.0, 60.0)
-        accel0_mag = rng.uniform(0.0, 1.0)
 
         # Uniform direction on sphere
         phi = rng.uniform(0.0, 2.0 * math.pi)
@@ -272,14 +302,10 @@ def run_monte_carlo(
             math.sin(theta) * math.sin(phi),
             math.cos(theta),
         ], dtype=float)
-        accel0_dir = np.array([
-            math.sin(theta) * math.cos(phi),
-            math.sin(theta) * math.sin(phi),
-            math.cos(theta),
-        ], dtype=float)
 
         rate0 = rate0_dir * rate0_mag
-        accel0 = accel0_dir * accel0_mag
+        # Angular acceleration follows applied torque; it is not a sampled state.
+        accel0 = np.zeros(3)
         tasks.append((i, rate0, accel0))
 
     # Run baseline trial first to determine timeout
@@ -289,11 +315,7 @@ def run_monte_carlo(
         config.initial_body_rate_deg_sec_y,
         config.initial_body_rate_deg_sec_z,
     ], dtype=float)
-    baseline_accel0 = np.array([
-        config.initial_body_accel_deg_sec2_x,
-        config.initial_body_accel_deg_sec2_y,
-        config.initial_body_accel_deg_sec2_z,
-    ], dtype=float)
+    baseline_accel0 = np.zeros(3)
 
     progress = _TrialProgress(n_trials, show_progress)
     print(f"dt={dt_sec:g} s | workers={n_workers or 'auto (CPU count)'} | "
@@ -308,8 +330,8 @@ def run_monte_carlo(
         progress.close()
     baseline_time = baseline_result.time_to_complete_sec
     if timeout_sec is None:
-        timeout_sec = 3.0 * max(baseline_time, 1000.0)
-    print(f"Baseline: {'PASS' if baseline_result.success else 'TIMEOUT'} | "
+        timeout_sec = 3.0 * max(baseline_time, 1000.0) if math.isfinite(baseline_time) else 10000.0
+    print(f"Baseline: {'PASS' if baseline_result.success else 'FAILED'} | "
           f"time_to_complete={baseline_time:.1f} s | trial timeout={timeout_sec:.1f} s", flush=True)
 
     # Run remaining trials
@@ -390,7 +412,8 @@ if __name__ == "__main__":
     print(f"\n=== Results ===")
     print(f"Total trials: {len(results)}")
     print(f"Successful: {success_count} ({100.0*success_count/len(results):.1f}%)")
-    print(f"Timed out: {len(results)-success_count}")
+    print(f"Timed out: {sum(not r.success and not r.failure_reason for r in results)}")
+    print(f"Capacity/numerical failures: {sum(bool(r.failure_reason) for r in results)}")
     print(f"Hit rate cap: {sum(1 for r in results if r.hit_rate_cap)} trials")
     if success_count > 0:
         success_results = [r for r in results if r.success]

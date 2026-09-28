@@ -5,6 +5,9 @@ import argparse
 import json
 import os
 import pickle
+import hashlib
+import tempfile
+import threading
 import time
 from dataclasses import dataclass, field
 from enum import Enum
@@ -16,6 +19,7 @@ import orekit
 import pandas as pd
 from datetime import datetime, timedelta
 from paths import figures_path, init_orekit_data, results_path
+from telemetry_metrics import interval_weights, weighted_mean, RunningRange, streaming_summary, plotting_sample
 
 # Import core models from shared module (no Orekit dependencies)
 from antara_models import (
@@ -219,7 +223,8 @@ class EPSModel:
         self.solar_generation_w = min(self.solar_generation_w, self.config.max_solar_power_w)
         return self.solar_generation_w
 
-    def compute_load(self, mode: str, adcs_slewing: bool, in_eclipse: bool, payload_pending: bool = False) -> float:
+    def compute_load(self, mode: str, adcs_slewing: bool, in_eclipse: bool, payload_pending: bool = False,
+                     *, slew_fraction: Optional[float] = None) -> float:
         """Compute the current spacecraft electrical load for the active mode.
 
         `mode` is always the top-level FSM mode string (e.g. 'SUN_POINTING').
@@ -227,10 +232,14 @@ class EPSModel:
         and are never passed here; they do not change the electrical load budget.
         """
 
+        fraction = float(adcs_slewing) if slew_fraction is None else float(slew_fraction)
+        if not math.isfinite(fraction) or not 0.0 <= fraction <= 1.0:
+            raise ValueError("Slew duty fraction must be finite and within [0, 1]")
         baseline_w = self.config.obc_power_w + self.config.eps_power_w
         if in_eclipse:
             baseline_w += self.config.eclipse_heater_power_w
-        adcs_power_w = self.config.adcs_slew_power_w if adcs_slewing else self.config.adcs_idle_power_w
+        adcs_power_w = self.config.adcs_idle_power_w + fraction * (
+            self.config.adcs_slew_power_w - self.config.adcs_idle_power_w)
         payload_power_w = self.config.payload_power_w if (mode == "DETECTION" or payload_pending) else 0.0
         if mode in {"COLD_AND_DARK", "DETUMBLE"}:
             self.load_w = baseline_w
@@ -330,11 +339,12 @@ class SAAModel:
                 "entry_time_sec": time_sec,
                 "entry_lat_deg": lat_deg,
                 "entry_lon_deg": lon_deg,
-                "data_collected_mb": 0.0,
+                "data_collected_mb": science_data_step_mb,
             }
             return "ENTRY", dict(self.current_pass)
 
-        if self.current_pass is not None and curr_inside:
+        # The exit interval may serialize the preceding pass's pending histogram.
+        if self.current_pass is not None and (curr_inside or prev_inside):
             self.current_pass["data_collected_mb"] += science_data_step_mb
 
         if prev_inside and not curr_inside and self.current_pass is not None:
@@ -606,13 +616,11 @@ class ProtonEnvironmentModel:
     ------------
     1. SAA depth factor: scales flux by how deep inside the SAA polygon
        the sub-satellite point is, using Shapely distance-to-boundary.
-    2. Pitch angle: computed from IGRF B-field and satellite velocity vector.
+    2. Pitch angle: computed from IGRF B-field and supplied detector look vector.
     3. East-West asymmetry: directional flux correction from geomagnetic
        field curvature (east-going protons are harder to mirror at low
        altitude than west-going ones).
-    4. AP9 comparison: queries spacepy.irbempy AP9 mean flux for the same
-       position at quiet-time for residual analysis. Falls back to the
-       config baseline if spacepy is unavailable.
+    4. Configured baseline spectrum; no live AP9 backend is implemented.
     5. Flux equation per channel i:
          Φ_meas[i] = Φ_AP9[i] × saa_depth_factor × f_pitch[i] × f_ew × f_storm
        where:
@@ -682,7 +690,7 @@ class ProtonEnvironmentModel:
     ) -> float:
         """
         Compute the magnetic pitch angle between the local B-field direction
-        and the satellite velocity vector (used as the detector look direction).
+        and the supplied detector look vector (legacy velocity argument name).
 
         pitch_angle = arccos( |v̂ · B̂| )
 
@@ -746,7 +754,7 @@ class ProtonEnvironmentModel:
         alt_km: float,
     ) -> np.ndarray:
         """
-        Query AP9 mean differential proton flux via spacepy.irbempy.
+        Return the configured baseline (legacy method name; no live AP9 backend).
 
         If spacepy is unavailable, returns the config baseline (quiet-time
         representative values). The returned array is always in the same unit
@@ -761,41 +769,12 @@ class ProtonEnvironmentModel:
         -------
         np.ndarray shape (n_channels,) — AP9 mean flux per energy channel
         """
-        if not self._spacepy_available:
-            return self.ap9_baseline.copy()
-        try:
-            # spacepy.irbempy.get_AEP8 interface:
-            # Inputs: energy (MeV), position (GDZ: alt_km, lat, lon)
-            # whichm: 'AP9' for protons
-            # returns: omni-directional flux (particles / cm² / s)
-            # Convert to differential flux: divide by energy bin width and 4π sr
-            results = []
-            for energy_mev in self.energy_channels:
-                coords = irbem.Coords(
-                    [alt_km, lat_deg, lon_deg],
-                    "GDZ",
-                    "sph",
-                )
-                flux_omni = irbem.get_AEP8(
-                    energy_mev,
-                    loci=coords,
-                    whichm="AP9",
-                    whatf="Flux",
-                )
-                # AP9 returns integral (omni); approximate differential by
-                # finite-difference with adjacent 20% energy step
-                de_mev = energy_mev * 0.20
-                flux_diff_per_sr = max(0.0, float(flux_omni)) / (4.0 * math.pi * de_mev)
-                results.append(flux_diff_per_sr)
-            return np.array(results, dtype=float)
-        except Exception as exc:
-            # SpacePy's AE8/AP8 interface does not implement AP9. Keep the
-            # existing baseline fallback, but never present it as live AP9.
-            if not self._ap9_query_warned:
-                print(f"[WARN] AP9 query unavailable ({type(exc).__name__}: {exc}). "
-                      "SpacePy get_AEP8 supports AE8/AP8, not AP9; using configured flux baseline.")
-                self._ap9_query_warned = True
-            return self.ap9_baseline.copy()
+        # Legacy API name retained for callers/checkpoints. No live AP9 backend
+        # is implemented: never call an AE8/AP8 API with an invented AP9 selector.
+        if not self._ap9_query_warned:
+            print("[WARN] AP9 unavailable: using configured differential-flux baseline (not live AP9).")
+            self._ap9_query_warned = True
+        return self.ap9_baseline.copy()
 
     def compute_flux(
         self,
@@ -1181,27 +1160,28 @@ class PayloadModel:
 
         pitch_deg = float(flux_result.get("pitch_angle_deg", 90.0))
         ew_factor = float(flux_result.get("ew_factor", 1.0))
-        storm_factor = self.config.storm_time_flux_multiplier if storm_time else 1.0
-        f_pitch = math.cos(math.radians(min(90.0, max(0.0, pitch_deg)))) ** self.proton_env.PITCH_EXPONENT
-        f_pitch = max(0.0, f_pitch)
-
-        measured_flux = self.region_base_flux_lookup[region] * (f_pitch * ew_factor * storm_factor)
+        # One authoritative environment spectrum, interpolated linearly in
+        # energy onto detector bin centers; no hidden second flux table.
+        energies = np.asarray(self.config.energy_channels_mev, dtype=float)
+        def detector_spectrum(key):
+            values = np.asarray(flux_result[key], dtype=float)
+            if values.shape != energies.shape or not np.all(np.isfinite(values)) or np.any(values < 0):
+                raise ValueError(f"Invalid environment spectrum: {key}")
+            if np.any(np.diff(energies) <= 0) or energies[0] > self.bin_centers_mev[0] or energies[-1] < self.bin_centers_mev[-1]:
+                raise ValueError("Environment energy grid must cover detector bins and increase strictly")
+            return np.interp(self.bin_centers_mev, energies, values)
+        measured_flux = detector_spectrum("measured_flux")
         if np.any(self.rear_veto_mask):
             measured_flux = measured_flux.copy()
             measured_flux[self.rear_veto_mask] *= 0.1
-        ap9_flux = self.region_base_flux_lookup[region].copy()
+        ap9_flux = detector_spectrum("ap9_flux")
 
         raw_rate_hz = measured_flux * self.geometric_factor_cm2sr * self.bin_efficiency_lookup * self.bin_widths_mev
         deadtime_scale = self.config.detector_dead_time_ns * 1.0e-9
         livetime_fractions = 1.0 / (1.0 + np.maximum(raw_rate_hz, 0.0) * deadtime_scale)
         total_count_rate = raw_rate_hz * livetime_fractions + self.config.detector_dark_count_rate_hz
         accepted_counts = total_count_rate * dt_sec
-        sigma_denominator = max(self._cell_total_counts.get(cell_id, 0.0) + float(np.sum(accepted_counts)), 1.0)
-        sigma_fraction = np.full(self.n_bins, 1.0 / math.sqrt(sigma_denominator), dtype=float)
         event_types = list(self.bin_event_type_map)
-
-        self._cell_histograms[cell_id] += accepted_counts
-        self._cell_total_counts[cell_id] += float(np.sum(accepted_counts))
 
         if self.config.enable_periphery_bin_merge and region in {"periphery", "ultra-periphery"}:
             merged_slice = slice(0, 3)
@@ -1209,6 +1189,12 @@ class PayloadModel:
             if merged_counts > 0.0:
                 accepted_counts[0] = merged_counts
                 accepted_counts[1:3] = 0.0
+
+        # Archive and packet counters describe the same (possibly merged) bins.
+        # Statistical precision belongs to each bin, not the pooled count.
+        self._cell_histograms[cell_id] += accepted_counts
+        self._cell_total_counts[cell_id] += float(np.sum(accepted_counts))
+        sigma_fraction = 1.0 / np.sqrt(np.maximum(self._cell_histograms[cell_id], 1.0))
 
         # Event-driven snapshot: accumulate into this cell's pending buffer.
         # A packet is flushed (data_mb > 0 this call) when the spacecraft
@@ -2033,6 +2019,8 @@ class ANTARAScienceSimulator:
         """Build the mission environment, Orekit propagator, and subsystem models."""
 
         self.config = config or MissionConfig()
+        self._checkpoint_lock = threading.RLock()
+        self._at_step_boundary = True
         self.utc = None
         self.start_date = None
         self.inertial_frame = None
@@ -2094,6 +2082,7 @@ class ANTARAScienceSimulator:
         self.previous_in_saa = False
         self.previous_gs_visible = False
         self.previous_gs_visible_2 = False
+        self._relay_station_id: Optional[str] = None
         self.current_attitude_command: Optional[AttitudeCommand] = None
         self._steps_since_mode_transition = 9999
         self.current_sun_incidence_angle_deg = 90.0
@@ -2117,8 +2106,8 @@ class ANTARAScienceSimulator:
         self.detection_no_science_duration_sec = 0.0
         self.warning_state: Dict[str, bool] = {}
         self.rng = np.random.default_rng(self.config.rng_seed)
-        self.beta_angle_history_deg: List[float] = []
-        self.orbital_period_history_min: List[float] = []
+        self.beta_angle_history_deg = RunningRange()
+        self.orbital_period_history_min = RunningRange()
         self._last_progress_time_sec = 0.0
         self._last_progress_science_mb = 0.0
         self._run_geometric_self_tests()
@@ -2129,206 +2118,149 @@ class ANTARAScienceSimulator:
 
         return self.initial_non_science_storage_mb + self.science_storage_mb
 
-    # Stage 0.4: Checkpoint/Resume skeleton
+    _CHECKPOINT_COMPONENTS = {
+        "adcs": {"config"}, "eps": {"config"}, "fsm": {"config"},
+        "payload": {"config", "proton_env", "layer_specs"},
+        "proton_env": {"config", "saa_polygon"},
+        "saa": {"saa_polygon"},
+        "ground_station": {"config", "station_point", "frame", "earth_frame"},
+        "ground_station_2": {"config", "station_point", "frame", "earth_frame"},
+        "communications": {"config"}, "logger": set(),
+    }
+    _CHECKPOINT_RUNTIME = {
+        "config", "utc", "start_date", "inertial_frame", "earth_frame",
+        "earth", "sun", "propagator", "eclipse_detector", "igrf",
+        "_saa_polygon_geo", "rng", "_checkpoint_lock", "current_attitude_command",
+    }
+
     def save_checkpoint(self, path) -> None:
-        """Save simulator state to a checkpoint file.
+        """Atomically save a trusted local checkpoint at a completed-step boundary.
 
-        Attempts pickle first; on failure falls back to JSON + numpy .npz.
+        Java runtime objects are reconstructed, not pickled. The telemetry prefix
+        is identified by byte length and hash; keep that CSV with the checkpoint.
+        Unsupported state fails explicitly instead of silently losing types in JSON.
         """
+        from dataclasses import asdict
         path = Path(path)
-        # Save RNG state
-        rng_state = self.rng.bit_generator.state if hasattr(self.rng, 'bit_generator') else None
-
-        state = {
-            "fsm": {k: v for k, v in self.fsm.__dict__.items() if not k.startswith('_')},
-            "adcs": {k: v for k, v in self.adcs.__dict__.items() if not k.startswith('_')},
-            "eps": {k: v for k, v in self.eps.__dict__.items() if not k.startswith('_')},
-            "payload": {
-                "total_science_data_generated_mb": self.payload.total_science_data_generated_mb,
-                "total_detection_seconds": self.payload.total_detection_seconds,
-                "_cell_histograms": {k: v.tolist() if isinstance(v, np.ndarray) else v for k, v in self.payload._cell_histograms.items()},
-                "_pending_bin_counts": {k: v.tolist() if isinstance(v, np.ndarray) else v for k, v in self.payload._pending_bin_counts.items()},
-                "_pending_cell_elapsed_sec": self.payload._pending_cell_elapsed_sec,
-                "_previous_cell_id": self.payload._previous_cell_id,
-                "_current_pass_records": self.payload._current_pass_records,
-            },
-            "saa": {
-                "current_pass": self.saa.current_pass,
-                "completed_passes": self.saa.completed_passes,
-            },
-            "ground_station": {
-                "current_contact": self.ground_station.current_contact,
-                "completed_contacts": self.ground_station.completed_contacts,
-            },
-            "ground_station_2": {
-                "current_contact": self.ground_station_2.current_contact if self.ground_station_2 else None,
-                "completed_contacts": self.ground_station_2.completed_contacts if self.ground_station_2 else [],
-            },
-            "communications": {
-                "total_downlinked_mb": self.communications.total_downlinked_mb,
-                "total_contact_seconds": self.communications.total_contact_seconds,
-            },
-            "science_storage_mb": self.science_storage_mb,
-            "previous_in_saa": self.previous_in_saa,
-            "previous_gs_visible": self.previous_gs_visible,
-            "previous_gs_visible_2": getattr(self, 'previous_gs_visible_2', False),
-            "rng_state": rng_state,
-            "time_sec": getattr(self, 'time_sec', 0.0),
-            "logger": {
-                "slew_event_rows": self.logger.slew_event_rows,
-                "detumble_event_rows": self.logger.detumble_event_rows,
-                "rejected_transition_rows": self.logger.rejected_transition_rows,
-                "_flush_path": str(self.logger._flush_path) if self.logger._flush_path else None,
-                "_flush_header_written": self.logger._flush_header_written,
-                "_flushed_row_count": self.logger._flushed_row_count,
-            },
-            "active_slew_event_index": self.active_slew_event_index,
-            "active_detumble_event_index": self.active_detumble_event_index,
-            "config": self.config,
-        }
-        # Try pickle first
-        try:
-            with open(path, 'wb') as f:
-                pickle.dump(state, f, protocol=pickle.HIGHEST_PROTOCOL)
-        except (pickle.PicklingError, TypeError, AttributeError) as e:
-            # Fallback to JSON + numpy .npz
-            print(f"[Checkpoint] Pickle failed ({e}), falling back to JSON+NPZ")
-            json_path = Path(str(path).replace('.pkl', '.json'))
-            npz_path = Path(str(path).replace('.pkl', '.npz'))
-            # Separate numpy arrays for NPZ
-            npz_data = {}
-            json_state = {}
-            for k, v in state.items():
-                if isinstance(v, np.ndarray):
-                    npz_data[k] = v
-                elif isinstance(v, dict):
-                    # Check for nested numpy arrays
-                    flat = {}
-                    has_numpy = False
-                    for k2, v2 in v.items():
-                        if isinstance(v2, np.ndarray):
-                            npz_data[f"{k}_{k2}"] = v2
-                            has_numpy = True
-                        else:
-                            flat[k2] = v2
-                    if has_numpy:
-                        json_state[k] = flat
-                    else:
-                        json_state[k] = v
-                else:
-                    json_state[k] = v
-            with open(json_path, 'w') as f:
-                json.dump(json_state, f, default=str)
-            if npz_data:
-                np.savez_compressed(npz_path, **npz_data)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with self._checkpoint_lock:
+            if not self._at_step_boundary:
+                raise RuntimeError("Cannot checkpoint an incomplete or failed integration step")
+            self.logger.flush_telemetry()
+            prefix = None
+            if self.logger._flush_path is not None and self.logger._flush_path.exists():
+                source = self.logger._flush_path.resolve()
+                digest = hashlib.sha256()
+                size = 0
+                with source.open("rb") as stream:
+                    for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                        digest.update(chunk)
+                        size += len(chunk)
+                prefix = {"path": str(source), "size": size, "sha256": digest.hexdigest()}
+            excluded = self._CHECKPOINT_RUNTIME | set(self._CHECKPOINT_COMPONENTS)
+            state = {
+                "version": 7, "config": self.config,
+                "simulation": {k: v for k, v in vars(self).items() if k not in excluded},
+                "components": {
+                    name: {k: v for k, v in vars(getattr(self, name)).items() if k not in omit}
+                    if getattr(self, name) is not None else None
+                    for name, omit in self._CHECKPOINT_COMPONENTS.items()
+                },
+                "command": asdict(self.current_attitude_command) if self.current_attitude_command else None,
+                "rng_state": self.rng.bit_generator.state,
+                "telemetry_prefix": prefix,
+            }
+            # Stream into a temporary file, preserving a previous good checkpoint
+            # on serialization failure without another whole-snapshot RAM copy.
+            temporary = None
+            try:
+                with tempfile.NamedTemporaryFile(dir=path.parent, prefix=path.name + ".", delete=False) as stream:
+                    temporary = Path(stream.name)
+                    pickle.dump(state, stream, protocol=pickle.HIGHEST_PROTOCOL)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                os.replace(temporary, path)
+            finally:
+                if temporary is not None and temporary.exists():
+                    temporary.unlink()
 
     @classmethod
-    def load_checkpoint(cls, path, config):
-        """Load simulator state from a checkpoint file.
+    def load_checkpoint(cls, path, config=None):
+        """Restore version-7 state into a fresh runtime and a separate telemetry file.
 
-        Tries pickle first; on failure tries JSON + numpy .npz.
+        Load only checkpoints you trust: pickle can execute Python code.
+        Old incomplete pickle/JSON checkpoints are rejected, not guessed at.
         """
-        path = Path(path)
-        state = None
-        # Try pickle first
-        try:
-            with open(path, 'rb') as f:
-                state = pickle.load(f)
-        except (pickle.UnpicklingError, EOFError, FileNotFoundError):
-            # Try JSON + NPZ fallback
-            json_path = Path(str(path).replace('.pkl', '.json'))
-            npz_path = Path(str(path).replace('.pkl', '.npz'))
-            if json_path.exists():
-                with open(json_path, 'r') as f:
-                    json_state = json.load(f)
-                npz_data = {}
-                if npz_path.exists():
-                    npz_data = dict(np.load(npz_path, allow_pickle=True))
-                # Reconstruct state
-                state = {}
-                for k, v in json_state.items():
-                    if k in npz_data:
-                        state[k] = npz_data[k]
-                    elif isinstance(v, dict):
-                        # Check for NPZ entries that belong to this dict
-                        reconstructed = {}
-                        for k2, v2 in v.items():
-                            npz_key = f"{k}_{k2}"
-                            if npz_key in npz_data:
-                                reconstructed[k2] = npz_data[npz_key]
-                            else:
-                                reconstructed[k2] = v2
-                        state[k] = reconstructed
-                    else:
-                        state[k] = v
-        if state is None:
-            raise RuntimeError(f"Failed to load checkpoint from {path}")
-
+        from dataclasses import asdict, replace
+        with Path(path).open("rb") as stream:
+            state = pickle.load(stream)
+        if not isinstance(state, dict) or state.get("version") != 7:
+            raise ValueError("Unsupported/incomplete checkpoint; a version-7 checkpoint is required (nominal frame and slew energy changed)")
+        saved_config = state["config"]
+        config = config or saved_config
+        a, b = asdict(config), asdict(saved_config)
+        for key in ("output_tag", "no_plots"):
+            a.pop(key)
+            b.pop(key)
+        if a != b:
+            raise ValueError("Resume configuration differs from checkpoint physics or duration")
+        if config.output_tag == saved_config.output_tag:
+            config = replace(config, output_tag=f"{config.output_tag or 'science'}_resume_{time.time_ns()}")
+        destination = results_path("science", f"{config.output_tag}_ANTARA_Science_telemetry.csv")
+        if destination.exists():
+            raise FileExistsError(f"Refusing to overwrite resume telemetry: {destination}")
+        prefix = state["telemetry_prefix"]
+        # Validate the entire saved prefix before creating a simulator/output.
+        if prefix is not None:
+            digest = hashlib.sha256()
+            remaining = prefix["size"]
+            with Path(prefix["path"]).open("rb") as stream:
+                while remaining:
+                    chunk = stream.read(min(remaining, 1024 * 1024))
+                    if not chunk:
+                        raise ValueError("Checkpoint telemetry prefix is truncated")
+                    digest.update(chunk)
+                    remaining -= len(chunk)
+            if digest.hexdigest() != prefix["sha256"]:
+                raise ValueError("Checkpoint telemetry prefix has changed")
         sim = cls(config)
-        # Restore non-ADCS state first (ADCS will be restored AFTER propagator init
-        # because _init_propagator runs geometric self-tests that modify ADCS state)
-        for k, v in state.get("fsm", {}).items():
-            setattr(sim.fsm, k, v)
-        for k, v in state.get("eps", {}).items():
-            setattr(sim.eps, k, v)
-        for k, v in state.get("payload", {}).items():
-            if k in {"_cell_histograms", "_pending_bin_counts"}:
-                # Convert lists back to numpy arrays
-                setattr(sim.payload, k, {k2: np.array(v2) for k2, v2 in v.items()})
-            else:
-                setattr(sim.payload, k, v)
-        for k, v in state.get("saa", {}).items():
-            setattr(sim.saa, k, v)
-        for k, v in state.get("ground_station", {}).items():
-            setattr(sim.ground_station, k, v)
-        if sim.ground_station_2:
-            for k, v in state.get("ground_station_2", {}).items():
-                setattr(sim.ground_station_2, k, v)
-
-        # Restore communications
-        for k, v in state.get("communications", {}).items():
-            setattr(sim.communications, k, v)
-
-        # Restore science storage
-        sim.science_storage_mb = state.get("science_storage_mb", 0.0)
-
-        # Restore SAA/GS previous state
-        sim.previous_in_saa = state.get("previous_in_saa", False)
-        sim.previous_gs_visible = state.get("previous_gs_visible", False)
-        sim.previous_gs_visible_2 = state.get("previous_gs_visible_2", False)
-
-        # Restore RNG state
-        rng_state = state.get("rng_state")
-        if rng_state is not None and hasattr(sim.rng, 'bit_generator'):
-            sim.rng.bit_generator.state = rng_state
-
-        # Restore time
-        sim.time_sec = state.get("time_sec", 0.0)
-
-        # Restore active event indices (on simulator, not logger)
-        sim.active_slew_event_index = state.get("active_slew_event_index")
-        sim.active_detumble_event_index = state.get("active_detumble_event_index")
-
-        # Restore logger state
-        logger_state = state.get("logger", {})
-        for k, v in logger_state.items():
-            if k == "_flush_path" and v:
-                setattr(sim.logger, k, Path(v))
-            else:
-                setattr(sim.logger, k, v)
-
-        # Recreate propagator and fast-forward to checkpoint time
-        # NOTE: This runs geometric self-tests which modify ADCS state, so we restore ADCS AFTER
-        sim._init_propagator()
-        if sim.time_sec > 0:
-            absolute_date = sim.start_date.shiftedBy(sim.time_sec)
-            sim.propagator.propagate(absolute_date)
-
-        # NOW restore ADCS state (after geometric self-tests have run)
-        for k, v in state.get("adcs", {}).items():
-            setattr(sim.adcs, k, v)
-
+        vars(sim).update(state["simulation"])
+        for name, values in state["components"].items():
+            if values is not None:
+                vars(getattr(sim, name)).update(values)
+        sim.current_attitude_command = AttitudeCommand(**state["command"]) if state["command"] else None
+        sim.rng.bit_generator.state = state["rng_state"]
+        # Rebuild propagation history up to the boundary, without changing ADCS.
+        if getattr(sim, "time_sec", 0.) > 0:
+            sim._propagate_state(sim.start_date.shiftedBy(sim.time_sec))
+        if prefix is not None:
+            with Path(prefix["path"]).open("rb") as source, destination.open("xb") as target:
+                remaining = prefix["size"]
+                while remaining:
+                    chunk = source.read(min(remaining, 1024 * 1024))
+                    if not chunk:
+                        raise ValueError("Checkpoint telemetry changed during restore")
+                    target.write(chunk)
+                    remaining -= len(chunk)
+        sim.logger._flush_path = destination
+        print(f"[Checkpoint] Restored T+{getattr(sim, 'time_sec', 0.):.3f}s; telemetry: {destination}")
         return sim
+
+    def configure_checkpointing(self, hours: float) -> None:
+        """Schedule synchronous checkpoints in simulated time, never a worker thread."""
+        if not math.isfinite(hours) or hours <= 0:
+            raise ValueError("Checkpoint interval must be finite and positive")
+        self._checkpoint_interval_sec = hours * 3600.
+        self._next_checkpoint_sec = getattr(self, "time_sec", 0.) + self._checkpoint_interval_sec
+
+    def _maybe_save_periodic_checkpoint(self) -> None:
+        due = getattr(self, "_next_checkpoint_sec", float("inf"))
+        if self.time_sec >= due:
+            interval = self._checkpoint_interval_sec
+            self._next_checkpoint_sec = due + (math.floor((self.time_sec - due) / interval) + 1) * interval
+            path = results_path("checkpoints", f"{self.config.output_tag or 'science'}_{self.time_sec:.6f}s.pkl")
+            self.save_checkpoint(path)
+            print(f"[Checkpoint] Saved at T+{self.time_sec:.3f}s: {path}")
 
     def _run_geometric_self_tests(self) -> None:
         """Abort startup if the quaternion/DCM convention is internally inconsistent."""
@@ -3077,12 +3009,12 @@ class ANTARAScienceSimulator:
         Authoritative body-frame convention (ICD Rev B):
           +X = RAM face / payload boresight  → aligned to velocity vector
           +Y = directional relay antenna face → aligned to nadir
-          +Z = fixed solar panel face         → aligned to orbit normal, sun-side
+          +Z = fixed solar panel face         → derived positive orbit normal
 
         This method always re-computes from the current orbital state (never
         an inertial freeze) for operational modes.  The spacecraft continuously
-        tracks the LVLH frame so +X stays ram, +Y stays nadir, and +Z stays on
-        the sun-facing side of the orbit normal.
+        tracks the LVLH frame so +X stays ram and +Y stays projected nadir.
+        The derived +Z is not necessarily Sun-facing.
 
         For COLD_AND_DARK and DETUMBLE phases the target is solved once at phase
         entry and then frozen via the early-return in _get_attitude_command, so
@@ -3093,45 +3025,24 @@ class ANTARAScienceSimulator:
           secondary +Y → nadir_unit      (NADIR)
           derived  +Z = cross(+X, +Y) = cross(v̂, -r̂) = r̂ × v̂  (orbit normal h)
 
-        A sun-side sign check ensures +Z is the orbit-normal half-space that
-        faces toward the Sun; if h points anti-sun the frame is re-built using
-        -h as the +Z reference.
+        Flipping +Z toward the Sun with +X fixed would reverse +Y away from
+        nadir. Preserve the frame; EPS must use its actual illumination.
         """
 
         velocity_unit = self._velocity_vector_unit(orbit_state)
         nadir_unit = self._nadir_vector_unit(orbit_state)
 
-        # Compute candidate orbit normal h = r × v.
-        # build_frame derives +Z = cross(v̂, -r̂) = r̂ × v̂ = h — normally correct.
-        # Sun-side check: if h points away from the Sun, use -h for +Z.
-        orbit_normal_candidate = self._orbit_normal_unit(orbit_state)
-        sun_unit = self._sun_vector_unit(orbit_state)
-        if float(np.dot(orbit_normal_candidate, sun_unit)) < 0.0:
-            # Sun is on the -h side; build with explicit +Z = -h.
-            z_reference = -orbit_normal_candidate
-            quaternion = self.build_frame(
-                "+X",
-                velocity_unit,
-                "+Z",
-                z_reference,
-                context="DEFAULT_ORIENTATION_HOLD target (sun-flip)",
-            )
-        else:
-            # Standard case: h already faces the sun.
-            quaternion = self.build_frame(
-                "+X",
-                velocity_unit,
-                "+Y",
-                nadir_unit,
-                context="DEFAULT_ORIENTATION_HOLD target",
-            )
+        quaternion = self.build_frame(
+            "+X", velocity_unit, "+Y", nadir_unit,
+            context="DEFAULT_ORIENTATION_HOLD target",
+        )
 
         return AttitudeCommand(
             quaternion=quaternion,
             primary_objective="+X -> RAM (velocity)",
-            secondary_objective="+Y -> nadir | +Z -> orbit normal (sun-side) | LVLH continuous re-solve",
+            secondary_objective="+Y -> nadir | +Z -> positive orbit normal | LVLH continuous re-solve",
             active_attitude_target="DEFAULT_ORIENTATION_HOLD",
-            attitude_hold_reason="Continuous LVLH hold: +X=RAM +Y=nadir +Z=orbit-normal-sun-side",
+            attitude_hold_reason="Continuous LVLH hold: +X=RAM +Y=nadir +Z=positive-orbit-normal",
         )
 
     def _validate_attitude_metrics(self, mode: str, orbit_state: OrbitState, gs_visible: bool) -> None:
@@ -3350,7 +3261,7 @@ class ANTARAScienceSimulator:
 
         SUN_POINTING is a power-state label, not an active Sun-tracking mode.
         The spacecraft holds the nominal LVLH frame (+X=RAM, +Y=nadir,
-        +Z=orbit-normal sun-side), re-solved every timestep.  No sun tracking
+        +Z=positive orbit normal), re-solved every timestep. No sun tracking
         occurs; the mode label only reflects the power/charging submode.
         """
         base_command = self._compute_default_orientation_attitude(orbit_state)
@@ -3358,7 +3269,7 @@ class ANTARAScienceSimulator:
             quaternion=base_command.quaternion.copy(),
             primary_objective="SUN_POINTING power-state hold (LVLH)",
             secondary_objective=(
-                "No Sun tracking; +X=RAM +Y=nadir +Z=orbit-normal (sun-side) LVLH continuous re-solve"
+                "No Sun tracking; +X=RAM +Y=nadir +Z=positive orbit normal; LVLH continuous re-solve"
             ),
             active_attitude_target="DEFAULT_ORIENTATION_HOLD",
             attitude_hold_reason="SUN_POINTING is a power label; attitude is continuous LVLH hold",
@@ -3375,14 +3286,14 @@ class ANTARAScienceSimulator:
         is sufficient for proton detection geometry.
 
         The LVLH frame is re-solved every timestep (not frozen inertially) so that
-        +Y stays nadir and +Z stays on the sun-side orbit normal as the orbit
+        +Y stays nadir and +Z stays on the positive orbit normal as the orbit
         progresses.  No active pointing, no slews to a science target.
         """
         base_command = self._compute_default_orientation_attitude(orbit_state)
         return AttitudeCommand(
             quaternion=base_command.quaternion.copy(),
             primary_objective="DETECTION LVLH hold: +X -> RAM (no active tracking)",
-            secondary_objective="+Y -> nadir | +Z -> orbit normal (sun-side) | continuous re-solve",
+            secondary_objective="+Y -> nadir | +Z -> positive orbit normal | continuous re-solve",
             active_attitude_target="DETECTION_INERTIAL_HOLD",
             attitude_hold_reason="DETECTION holds LVLH frame; no boresight tracking",
         )
@@ -3499,7 +3410,7 @@ class ANTARAScienceSimulator:
                 )
             command = self._compute_default_orientation_attitude(orbit_state)
             command.primary_objective = "Startup LVLH target (initial solve)"
-            command.secondary_objective = "+X=RAM +Y=nadir +Z=orbit-normal (sun-side) | frozen for detumble"
+            command.secondary_objective = "+X=RAM +Y=nadir +Z=positive orbit normal | frozen for detumble"
             return command
         if mode == "SAFE":
             return self._compute_safe_attitude(orbit_state)
@@ -3601,9 +3512,7 @@ class ANTARAScienceSimulator:
         """Compute the true Sun incidence angle on the +Z panel from the achieved attitude."""
         sun_unit = self._sun_vector_unit(orbit_state)
         body_z_in_inertial = self._body_axis_to_inertial(self.adcs.current_quaternion, "+Z")
-        cosine_incidence = np.clip(float(np.dot(self._unit_numpy(body_z_in_inertial), sun_unit)), -1.0, 1.0)
-        incidence_deg = math.degrees(math.acos(cosine_incidence))
-        return float(np.clip(incidence_deg, 0.0, 180.0))
+        return self._vector_angle_deg(body_z_in_inertial, sun_unit)
 
     def _compute_noisy_sun_incidence_angle_deg(self, orbit_state: OrbitState, mode: str) -> float:
         """Return the SUN_POINTING incidence angle with seeded Gaussian tracking noise."""
@@ -3621,12 +3530,7 @@ class ANTARAScienceSimulator:
 
         payload_axis_in_inertial = self._payload_boresight_inertial(self.adcs.current_quaternion)
         velocity_unit = self._velocity_vector_unit(orbit_state)
-        cosine_term = np.clip(
-            float(np.dot(self._unit_numpy(payload_axis_in_inertial), velocity_unit)),
-            -1.0,
-            1.0,
-        )
-        return math.degrees(math.acos(cosine_term))
+        return self._vector_angle_deg(payload_axis_in_inertial, velocity_unit)
 
     def _compute_relay_pointing_error_deg(
         self,
@@ -3641,12 +3545,7 @@ class ANTARAScienceSimulator:
             self.adcs.current_quaternion,
             relay_axis_label,
         )
-        cosine_term = np.clip(
-            float(np.dot(self._unit_numpy(relay_axis_in_inertial), target_unit)),
-            -1.0,
-            1.0,
-        )
-        return math.degrees(math.acos(cosine_term))
+        return self._vector_angle_deg(relay_axis_in_inertial, target_unit)
 
     def _compute_gs_off_boresight_deg(
         self,
@@ -3659,12 +3558,7 @@ class ANTARAScienceSimulator:
             return 180.0
         relay_axis_in_inertial = self._body_axis_to_inertial(self.adcs.current_quaternion, "+Y")
         gs_unit = self._ground_station_vector_unit(orbit_state)
-        cosine_term = np.clip(
-            float(np.dot(self._unit_numpy(relay_axis_in_inertial), gs_unit)),
-            -1.0,
-            1.0,
-        )
-        return math.degrees(math.acos(cosine_term))
+        return self._vector_angle_deg(relay_axis_in_inertial, gs_unit)
 
     def _attitude_deadband_for_mode(self, mode: str) -> float:
         """Return the mode-specific target-update deadband."""
@@ -3736,6 +3630,7 @@ class ANTARAScienceSimulator:
         error = self._compute_relay_pointing_error_deg(orbit_state, "+Y", gs_visible)
         if not gs_visible or error > self.config.pointing_accuracy_deg or self.adcs.saturation_hold_active:
             self._relay_tracking_valid_sec = 0.0
+            self.adcs.settled_time_sec = 0.0
             return
         self._relay_tracking_valid_sec = getattr(self, "_relay_tracking_valid_sec", 0.0) + dt_sec
         remaining = max(0.0, self.config.settling_time_sec - self._relay_tracking_valid_sec)
@@ -3752,8 +3647,23 @@ class ANTARAScienceSimulator:
         battery_wh: float,
         dt_sec: float,
         time_sec: float,
+        resolve_wheel_events: bool = False,
     ) -> None:
         """Update the ADCS target, enforce eclipse-hold behavior, and advance attitude dynamics."""
+        self._guidance_interval_sec = dt_sec
+        self.adcs.last_wheel_profile_enabled = False
+
+        def advance_interval(interval):
+            if resolve_wheel_events:
+                interval = ADCSModel.advance_limited(
+                    self.adcs, interval, 1.0 if sun_visible else 0.5,
+                    max(0.2, abs(math.sin(math.radians(orbit_state.beta_angle_deg)))),
+                    include_tracking=False)
+            else:
+                self.adcs.advance(interval)
+            self._guidance_interval_sec = interval
+            return interval
+
 
         hard_pointing_limit_deg = self._hard_pointing_limit_for_mode(mode)
         hard_pointing_error_deg = self._hard_pointing_error_for_mode(mode, orbit_state, gs_visible)
@@ -3778,7 +3688,7 @@ class ANTARAScienceSimulator:
                     self.adcs.command_attitude(
                         self.current_attitude_command.quaternion, "SLEWING",
                         self.current_attitude_command.primary_objective, force_update=True)
-            self.adcs.advance(dt_sec)
+            dt_sec = advance_interval(dt_sec)
             if self.target_mode == "RELAY":
                 self._update_relay_tracking_settlement(orbit_state, gs_visible, dt_sec)
             self.current_attitude_error_deg = self.adcs.get_pointing_error_deg()
@@ -3805,7 +3715,7 @@ class ANTARAScienceSimulator:
                 relay_axis_label=self.adcs.commanded_relay_axis,
                 sun_visible=sun_visible,
             )
-            self.adcs.advance(dt_sec)
+            dt_sec = advance_interval(dt_sec)
             self.current_attitude_error_deg = self.adcs.get_pointing_error_deg()
             self.current_sun_incidence_angle_deg = self._compute_noisy_sun_incidence_angle_deg(orbit_state, mode)
             self.current_payload_pointing_error_deg = self._compute_payload_pointing_error_deg(orbit_state)
@@ -3873,7 +3783,7 @@ class ANTARAScienceSimulator:
             and command.primary_objective == self.current_attitude_command.primary_objective
         ):
             self.current_attitude_command = command
-            self.adcs.advance(dt_sec)
+            dt_sec = advance_interval(dt_sec)
             self.current_attitude_error_deg = self.adcs.get_pointing_error_deg()
             self.current_sun_incidence_angle_deg = self._compute_noisy_sun_incidence_angle_deg(orbit_state, mode)
             self.current_payload_pointing_error_deg = self._compute_payload_pointing_error_deg(orbit_state)
@@ -3904,7 +3814,7 @@ class ANTARAScienceSimulator:
         self.current_attitude_command = command
         self.adcs.commanded_relay_axis = command.relay_axis_label or "+Y"
 
-        self.adcs.advance(dt_sec)
+        dt_sec = advance_interval(dt_sec)
 
         if mode == "RELAY":
             self._update_relay_tracking_settlement(orbit_state, gs_visible, dt_sec)
@@ -4076,7 +3986,15 @@ class ANTARAScienceSimulator:
 
         if self.fsm.current_mode != "SLEWING":
             return False
-        if self.adcs.saturation_hold_active or self.adcs.is_slewing or self.adcs.settling:
+        relay_acquisition = getattr(self, "target_mode", None) == "RELAY"
+        if self.adcs.saturation_hold_active:
+            return False
+        if relay_acquisition:
+            # Tracking a moving LOS need not reach zero angular rate. Require
+            # continuous measured alignment instead of a stationary-target flag.
+            if getattr(self, "_relay_tracking_valid_sec", 0.0) < self.config.settling_time_sec:
+                return False
+        elif self.adcs.is_slewing or self.adcs.settling:
             return False
         if self.current_attitude_command is not None:
             pending_error, _ = self.adcs.compute_slew(
@@ -4091,7 +4009,8 @@ class ANTARAScienceSimulator:
             target_mode = "SUN_POINTING"
         self.fsm.target_mode = target_mode
         self.fsm.slew_end_time_sec = time_sec
-        self.adcs.is_slewing = False
+        if not relay_acquisition:
+            self.adcs.is_slewing = False
         self.adcs.settling = False
         if self.active_slew_event_index is not None:
             self.logger.finalize_slew_event(self.active_slew_event_index, time_sec)
@@ -4659,11 +4578,12 @@ class ANTARAScienceSimulator:
     ) -> None:
         """Print the required ANTARA PDR mission summary to the console."""
 
+        weights = interval_weights(telemetry_df)
         total_sim_seconds = self.config.sim_duration_hours * 3600.0
-        avg_orbital_period_min = float(np.mean(self.orbital_period_history_min)) if self.orbital_period_history_min else np.nan
+        avg_orbital_period_min = self.orbital_period_history_min.mean
         total_revolutions = int(total_sim_seconds / (avg_orbital_period_min * 60.0)) if avg_orbital_period_min > 0.0 else 0
-        beta_min_deg = float(np.min(self.beta_angle_history_deg)) if self.beta_angle_history_deg else np.nan
-        beta_max_deg = float(np.max(self.beta_angle_history_deg)) if self.beta_angle_history_deg else np.nan
+        beta_min_deg = self.beta_angle_history_deg.minimum
+        beta_max_deg = self.beta_angle_history_deg.maximum
 
         total_slew_events = len(slew_events_df)
         # FIX Bug 4: adcs.total_slew_time_sec only accumulates inside advance() while
@@ -4681,9 +4601,9 @@ class ANTARAScienceSimulator:
             axis=1,
         )
         max_wheel_momentum_nms = float(np.max(wheel_momentum_mag)) if len(wheel_momentum_mag) > 0 else 0.0
-        adcs_duty_cycle_percent = 100.0 * (
+        adcs_duty_cycle_percent = 100.0 * weighted_mean(
             (telemetry_df["slew_angle_deg"] > 0.0) | (telemetry_df["attitude_error_deg"] > self.config.pointing_accuracy_deg)
-        ).mean()
+        , weights)
 
         total_saa_passes = len(saa_passes_df)
         total_saa_dwell_hours = float(saa_passes_df["dwell_sec"].sum() / 3600.0) if not saa_passes_df.empty else 0.0
@@ -4712,36 +4632,37 @@ class ANTARAScienceSimulator:
 
         min_battery_wh = float(telemetry_df["battery_wh"].min())
         max_battery_wh = float(telemetry_df["battery_wh"].max())
-        avg_solar_generation_w = float(telemetry_df["solar_w"].mean())
-        avg_load_w = float(telemetry_df["load_w"].mean())
+        avg_solar_generation_w = weighted_mean(telemetry_df["solar_w"], weights)
+        avg_load_w = weighted_mean(telemetry_df["load_w"], weights)
         if not telemetry_df.empty:
             adcs_base_load = telemetry_df["load_w"].to_numpy(dtype=float) - (self.config.obc_power_w + self.config.eps_power_w)
             mode_series = telemetry_df["mode"]
             adcs_base_load = adcs_base_load.copy()
             adcs_base_load[mode_series.to_numpy() == "DETECTION"] -= self.config.payload_power_w
             adcs_base_load[mode_series.to_numpy() == "RELAY"] -= self.config.radio_tx_power_w
-            avg_adcs_power_w = float(np.mean(np.maximum(adcs_base_load, 0.0)))
+            avg_adcs_power_w = weighted_mean(np.maximum(adcs_base_load, 0.0), weights)
         else:
             avg_adcs_power_w = 0.0
-        avg_net_power_w = float((telemetry_df["solar_w"] - telemetry_df["load_w"]).mean())
-        eclipse_fraction_percent = 100.0 * telemetry_df["in_eclipse"].mean()
-        power_positive_fraction_percent = 100.0 * (telemetry_df["solar_w"] > telemetry_df["load_w"]).mean()
-        average_sun_incidence_deg = float(telemetry_df["sun_incidence_angle_deg"].mean())
+        avg_net_power_w = weighted_mean(telemetry_df["solar_w"] - telemetry_df["load_w"], weights)
+        eclipse_fraction_percent = 100.0 * weighted_mean(telemetry_df["in_eclipse"], weights)
+        power_positive_fraction_percent = 100.0 * weighted_mean(telemetry_df["solar_w"] > telemetry_df["load_w"], weights)
+        average_sun_incidence_deg = weighted_mean(telemetry_df["sun_incidence_angle_deg"], weights)
         max_sun_incidence_deg = float(telemetry_df["sun_incidence_angle_deg"].max())
         relay_rows = telemetry_df[telemetry_df["mode"] == "RELAY"]
         detection_rows = telemetry_df[telemetry_df["mode"] == "DETECTION"]
         average_relay_pointing_error_deg = (
-            float(relay_rows["relay_pointing_error_deg"].mean()) if not relay_rows.empty else 0.0
+            weighted_mean(relay_rows["relay_pointing_error_deg"], weights.loc[relay_rows.index]) if not relay_rows.empty else 0.0
         )
         average_payload_ram_pointing_error_deg = (
-            float(detection_rows["payload_pointing_error_deg"].mean()) if not detection_rows.empty else 0.0
+            weighted_mean(detection_rows["payload_pointing_error_deg"], weights.loc[detection_rows.index]) if not detection_rows.empty else 0.0
         )
         average_attitude_error_per_mode = (
-            telemetry_df.groupby("mode")["attitude_error_deg"].mean().to_dict()
+            {mode: weighted_mean(group["attitude_error_deg"], weights.loc[group.index])
+             for mode, group in telemetry_df.groupby("mode")}
             if not telemetry_df.empty
             else {}
         )
-        average_wheel_momentum_nms = float(np.mean(wheel_momentum_mag)) if len(wheel_momentum_mag) > 0 else 0.0
+        average_wheel_momentum_nms = weighted_mean(wheel_momentum_mag, weights) if len(wheel_momentum_mag) > 0 else 0.0
 
         sim_duration_label = (
             f"{self.config.sim_duration_hours:.0f}-hour"
@@ -4829,7 +4750,7 @@ class ANTARAScienceSimulator:
         if "sun_submode" in telemetry_df.columns:
             print("\nSUN_POINTING Submode Breakdown:")
             for submode_label in [SunSubmode.CHARGING, SunSubmode.PASSIVE, SunSubmode.ECLIPSE]:
-                submode_sec = (telemetry_df["sun_submode"] == submode_label).sum() * self.config.step_sec
+                submode_sec = weights[telemetry_df["sun_submode"] == submode_label].sum()
                 submode_hours = submode_sec / 3600.0
                 sun_pointing_total_sec = self.fsm.mode_durations_sec["SUN_POINTING"]
                 submode_pct = (
@@ -4920,24 +4841,78 @@ class ANTARAScienceSimulator:
             f"Rate={rate_kb_per_hr:7.3f} KB/hr"
         )
 
+    def _append_terminal_snapshot(self, time_sec: float, flushed_mb: float) -> None:
+        """Observe the horizon without another dynamics, count or transmission step."""
+        row = dict(self._last_telemetry_record)
+        orbit = self._build_orbit_state(self._propagate_state(self.start_date.shiftedBy(time_sec)), time_sec)
+        geometry = self._ground_station_geometry(orbit)
+        axes = self._update_alignment_telemetry(orbit, geometry.visible)
+        row.update(time_sec=time_sec, state_time_sec=time_sec, interval_duration_sec=0.,
+                   terminal_snapshot=True, wheel_event_split=False, mode=self.fsm.current_mode,
+                   lat_deg=orbit.latitude_deg, lon_deg=orbit.longitude_deg, alt_km=orbit.altitude_km,
+                   in_sunlight=not orbit.in_eclipse, sun_visible=not orbit.in_eclipse,
+                   in_eclipse=bool(orbit.in_eclipse), in_saa=self.saa.is_inside(orbit.latitude_deg, orbit.longitude_deg),
+                   gs_visible=geometry.visible, science_data_mb=flushed_mb, downlinked_mb=0.,
+                   cumulative_science_generated_mb=self.payload.total_science_data_generated_mb,
+                   cumulative_downlinked_mb=self.communications.total_downlinked_mb,
+                   storage_mb=self._get_total_storage_mb(), net_storage_delta_mb=flushed_mb,
+                   science_generation_enabled=False, relay_link_active=False,
+                   payload_pointing_error_deg=self._compute_payload_pointing_error_deg(orbit),
+                   relay_pointing_error_deg=self._compute_relay_pointing_error_deg(orbit, "+Y", geometry.visible),
+                   sun_pointing_error_deg=self._compute_sun_pointing_error_deg(orbit),
+                   sun_incidence_angle_deg=self._compute_sun_incidence_angle_deg(orbit),
+                   payload_boresight_inertial=axes[0], velocity_unit_vector=axes[1],
+                   relay_boresight_vector=axes[2], gs_los_vector=axes[3],
+                   payload_alignment_cosine=axes[4], relay_alignment_cosine=axes[5], gs_off_boresight_deg=axes[6])
+        for key in row:
+            if key.startswith(("fpdu_ch", "ap9_ch", "count_rate_ch")):
+                row[key] = 0.
+        # No detector measurement was taken at this zero-duration endpoint.
+        for key in ("science_measured_flux", "science_ap9_flux", "science_total_count_rate",
+                    "science_counts_per_bin", "science_sigma_fraction"):
+            row[key] = []
+        row.update(science_histogram_downlink_due=flushed_mb > 0.,
+                   science_histogram_bytes=int(round(flushed_mb * 1024 * 1024)),
+                   science_event_type="", science_cell_id="", science_region="unknown",
+                   science_saa_state_at_sample=None)
+        self.logger.log_step(row)
+
     def run(self) -> None:
+        """Continue to the configured horizon using the same loop as run_steps."""
+        with self._checkpoint_lock:
+            self._run_simulation()
+
+    def _run_simulation(self, n_steps: Optional[int] = None) -> None:
         """Run the ANTARA mission simulation for the configured duration.
 
         The default configuration is 24 hours. The run logs telemetry, renders
         the plots, writes CSV outputs, and prints the mission summary.
         """
 
+        if getattr(self, "_run_finished", False):
+            return
+        if not self._at_step_boundary:
+            raise RuntimeError("Previous integration/finalization failed; restore a valid checkpoint before continuing")
         final_time_sec = self.config.sim_duration_hours * 3600.0
+        if not math.isfinite(final_time_sec) or final_time_sec <= 0.0:
+            raise ValueError("Simulation duration must be finite and positive")
+        for value in (self.config.step_sec, self.config.coarse_step_sec):
+            if not math.isfinite(value) or value <= 0.0:
+                raise ValueError("Simulation timesteps must be finite and positive")
+        time_sec = getattr(self, "time_sec", 0.0)
+        self.time_sec = time_sec
+        completed_steps = 0
         step_sec = self.config.step_sec
         coarse_step_sec = getattr(self.config, 'coarse_step_sec', step_sec)
         progress_interval_sec = max(step_sec, self.config.progress_report_interval_sec)
-        next_progress_report_sec = 0.0
+        next_progress_report_sec = time_sec
 
         # Telemetry flush setup
         flush_interval_sec = self.config.telemetry_flush_interval_hours * 3600.0
-        next_flush_sec = 0.0
+        next_flush_sec = time_sec + flush_interval_sec
         telemetry_csv_path = results_path("science", f"{self.config.output_tag + '_' if self.config.output_tag else ''}ANTARA_Science_telemetry.csv")
-        self.logger.set_flush_path(telemetry_csv_path)
+        if self.logger._flush_path is None:
+            self.logger.set_flush_path(telemetry_csv_path)
 
         duration_label = (
             f"{self.config.sim_duration_hours:.0f}-hour"
@@ -4952,12 +4927,11 @@ class ANTARAScienceSimulator:
 
         relay_window_diagnostics = {
             }
-        time_sec = 0.0
-        self.time_sec = 0.0
         prev_illumination_fraction = 1.0
         illumination_fraction = 1.0
         current_mode = self.fsm.current_mode
-        while time_sec <= final_time_sec:
+        while time_sec < final_time_sec:
+            self._at_step_boundary = False
             # One elapsed interval for every subsystem. Startup and active
             # tracking require the fine cadence, including detumble physics.
             current_mode = self.fsm.current_mode
@@ -4966,8 +4940,7 @@ class ANTARAScienceSimulator:
             step_sec = self.config.step_sec if (
                 current_mode in fine_modes or near_eclipse_edge or self.adcs.saturation_hold_active
             ) else coarse_step_sec
-            if time_sec < final_time_sec:
-                step_sec = min(step_sec, final_time_sec - time_sec)
+            step_sec = min(step_sec, final_time_sec - time_sec)
 
             self.fsm.set_time(time_sec)
             self.adcs.set_time(time_sec)
@@ -4977,7 +4950,6 @@ class ANTARAScienceSimulator:
             orbit_state = self._build_orbit_state(propagated_state, time_sec)
 
             osculating_period_min = propagated_state.getOrbit().getKeplerianPeriod() / 60.0
-            self.orbital_period_history_min.append(osculating_period_min)
             self.beta_angle_history_deg.append(orbit_state.beta_angle_deg)
 
             gs_geometry = self._ground_station_geometry(orbit_state)
@@ -4988,7 +4960,25 @@ class ANTARAScienceSimulator:
             illumination_fraction = self._update_illumination_fraction(sun_visible, time_sec)
             battery_before_step_wh = self.eps.battery_wh
 
-            if self.fsm.current_mode == "SLEWING" and time_sec >= self.slew_end_time_sec:
+            # Station selection and attitude acquisition must change together.
+            # Persist a plain label, not a Java-backed station, in checkpoints.
+            station_id = ("primary" if gs_geometry.selected_station is self.ground_station
+                          else "secondary" if gs_geometry.selected_station is not None else None)
+            station_changed = station_id != getattr(self, "_relay_station_id", None)
+            self._relay_station_id = station_id
+            if station_changed:
+                self._relay_tracking_valid_sec = 0.0
+                if self.fsm.current_mode == "RELAY" or (
+                    self.fsm.current_mode == "SLEWING" and self.target_mode == "RELAY"
+                ):
+                    self.adcs.settled_time_sec = 0.0
+                if self.fsm.current_mode == "RELAY" and gs_visible:
+                    self._begin_slew_transition(
+                        "RELAY", "RELAY", "Ground-station handover: reacquire selected LOS",
+                        orbit_state, sun_visible, self.eps.battery_wh, gs_visible, time_sec)
+
+            if (self.fsm.current_mode == "SLEWING" and time_sec >= self.slew_end_time_sec
+                    and not (station_changed and self.target_mode == "RELAY")):
                 try:
                     self._complete_slew_transition(time_sec)
                 except IllegalFSMTransitionError as exc:
@@ -5003,6 +4993,9 @@ class ANTARAScienceSimulator:
                     )
             current_mode = self.fsm.current_mode
 
+            self._guidance_interval_sec = step_sec
+            requested_step_sec = step_sec
+            slew_time_before = self.adcs.total_slew_time_sec
             self._update_attitude_guidance(
                 current_mode,
                 orbit_state,
@@ -5011,7 +5004,15 @@ class ANTARAScienceSimulator:
                 self.eps.battery_wh,
                 step_sec,
                 time_sec,
+                resolve_wheel_events=True,
             )
+            step_sec = self._guidance_interval_sec
+            self.orbital_period_history_min.append(osculating_period_min, step_sec)
+            # Reject an unresolved slew before payload/storage/EPS side effects.
+            if current_mode != "DETUMBLE" and self.adcs.last_commanded_mode == "SLEWING":
+                self.adcs.validate_slew_momentum_peak(
+                    step_sec, 1.0 if sun_visible else 0.5,
+                    max(0.2, abs(math.sin(math.radians(orbit_state.beta_angle_deg)))))
             (
                 payload_boresight_inertial,
                 velocity_unit_vector,
@@ -5033,6 +5034,8 @@ class ANTARAScienceSimulator:
                 self.adcs.is_slewing,
                 not sun_visible,
                 payload_pending=(current_mode == "SLEWING" and self.target_mode == "DETECTION"),
+                slew_fraction=float(np.clip(
+                    (self.adcs.total_slew_time_sec - slew_time_before) / step_sec, 0., 1.)),
             )
 
             payload_pointing_valid = (
@@ -5048,6 +5051,10 @@ class ANTARAScienceSimulator:
             science_data_step_mb = 0.0
             flux_result: Dict[str, object] = {}
             science_sample_inside_saa: Optional[bool] = None
+
+            # Entry must precede the first sample and detection-step counter.
+            if not self.previous_in_saa and inside_saa:
+                self.payload.open_saa_pass()
 
             # FIX (Bug 1a): payload_settled was computed but never applied to the
             # science gate — science fired immediately on DETECTION entry before
@@ -5075,7 +5082,7 @@ class ANTARAScienceSimulator:
                     orbit_state.longitude_deg,
                     orbit_state.altitude_km,
                     b_inertial,
-                    self._vector_to_numpy(orbit_state.sat_velocity_inertial),
+                    self.adcs.rotate_body_axis_to_inertial(self.adcs.current_quaternion, np.array([1., 0., 0.])),
                     nadir_inertial_vec,
                     storm_time=self.storm_time,
                 )
@@ -5096,8 +5103,9 @@ class ANTARAScienceSimulator:
                     )
                     science_sample_inside_saa = True
 
-            if current_mode == "DETECTION" and science_generation_enabled and science_data_step_mb <= 0.0:
-                self._maybe_warn("detection_zero_science", "DETECTION active with valid pointing but zero science generated.")
+            if (current_mode == "DETECTION" and science_generation_enabled
+                    and float(np.sum(flux_result["accepted_counts"])) <= 0.0):
+                self._maybe_warn("detection_zero_science", "DETECTION active with valid pointing but zero detector counts accumulated.")
 
             downlinked_step_mb = 0.0
             relay_pointing_valid = (
@@ -5157,27 +5165,10 @@ class ANTARAScienceSimulator:
             if current_mode == "DETECTION" and inside_saa:
                 self.payload.count_detection_step()
 
-            saa_event = self.saa.detect_entry_exit(
-                self.previous_in_saa,
-                inside_saa,
-                time_sec,
-                orbit_state.latitude_deg,
-                orbit_state.longitude_deg,
-                orbit_state.absolute_date,
-                science_data_step_mb,
-            )
-
-            # Open payload pass on SAA entry
-            if not self.previous_in_saa and inside_saa:
-                self.payload.open_saa_pass()
-
-            # Close payload pass on SAA exit
+            # Serialize pending counts before the geographic pass is finalized,
+            # so all three ledgers (pass, telemetry, storage) credit the packet.
             if self.previous_in_saa and not inside_saa:
-                if saa_event and isinstance(saa_event, tuple):
-                    _, pass_dict = saa_event
-                    entry_t = float(pass_dict.get("entry_time_sec", time_sec))
-                else:
-                    entry_t = time_sec
+                entry_t = float((self.saa.current_pass or {}).get("entry_time_sec", time_sec))
                 saa_pass_close_flushed_mb = self.payload.close_saa_pass(
                     pass_index=self._saa_pass_index,
                     entry_time_sec=entry_t,
@@ -5188,6 +5179,12 @@ class ANTARAScienceSimulator:
                     science_data_step_mb += saa_pass_close_flushed_mb
                 self._saa_pass_index += 1
 
+            self.saa.detect_entry_exit(
+                self.previous_in_saa, inside_saa, time_sec,
+                orbit_state.latitude_deg, orbit_state.longitude_deg,
+                orbit_state.absolute_date, science_data_step_mb,
+            )
+
             self._record_ground_station_contacts(
                 gs_geometry, time_sec, orbit_state.absolute_date, downlinked_step_mb)
             self.previous_in_saa = inside_saa
@@ -5196,7 +5193,9 @@ class ANTARAScienceSimulator:
                 torque_vector_nm = self.adcs.estimate_torque_vector()
                 unload_scale = 1.0 if sun_visible else 0.5
                 b_projection_scale = max(0.2, abs(math.sin(math.radians(orbit_state.beta_angle_deg))))
-                self.adcs.update_wheel_momentum(torque_vector_nm, step_sec, unload_scale, b_projection_scale)
+                self.adcs.set_time(time_sec + step_sec)
+                self.adcs.update_wheel_momentum(torque_vector_nm, step_sec, unload_scale, b_projection_scale,
+                                               use_slew_profile=self.adcs.last_wheel_profile_enabled)
 
             self.eps.step(step_sec)
             self.fsm.accumulate_mode_time(step_sec)
@@ -5212,9 +5211,12 @@ class ANTARAScienceSimulator:
             )
 
             science_record = flux_result or {}
-            self.logger.log_step(
-                {
+            step_record = {
                     "time_sec": time_sec,
+                    "state_time_sec": time_sec + step_sec,
+                    "interval_duration_sec": step_sec,
+                    "terminal_snapshot": False,
+                    "wheel_event_split": step_sec < requested_step_sec,
                     "mode": current_mode,
                     "lat_deg": orbit_state.latitude_deg,
                     "lon_deg": orbit_state.longitude_deg,
@@ -5298,7 +5300,8 @@ class ANTARAScienceSimulator:
                     "panel_deployed": self.adcs.panel_deployed if hasattr(self.adcs, "panel_deployed") else False,
                     "rejected_transition_count": len(self.fsm.rejected_transition_history),
                 }
-            )
+            self.logger.log_step(step_record)
+            self._last_telemetry_record = step_record
 
             # ── AOS pre-slewing (now redundant with LVLH-fixed RELAY) ───────────────────
             # Previously this block pre-aimed the +Y antenna toward the GS before AOS.
@@ -5421,7 +5424,16 @@ class ANTARAScienceSimulator:
             # EPS, ADCS, payload and mode accounting already advanced once.
             time_sec += step_sec
             self.time_sec = time_sec
+            self._at_step_boundary = True
+            completed_steps += 1
+            if time_sec < final_time_sec:
+                self._maybe_save_periodic_checkpoint()
+                if n_steps is not None and completed_steps >= n_steps:
+                    self.logger.flush_telemetry()
+                    return
 
+        self._at_step_boundary = False
+        final_flushed_mb = 0.0
         if self.payload._current_pass_records:
             if self.saa.current_pass is not None:
                 entry_t = float(self.saa.current_pass.get("entry_time_sec", final_time_sec))
@@ -5434,8 +5446,15 @@ class ANTARAScienceSimulator:
             )
             if final_flushed_mb > 0.0:
                 self._update_storage(final_flushed_mb, 0.0)
+                if self.saa.current_pass is not None:
+                    self.saa.current_pass["data_collected_mb"] += final_flushed_mb
             self._saa_pass_index += 1
 
+        self._append_terminal_snapshot(final_time_sec, final_flushed_mb)
+        self._print_progress(final_time_sec, final_time_sec, self.fsm.current_mode,
+                             self.eps.battery_wh, self._get_total_storage_mb(),
+                             self.eps.solar_generation_w, self.eps.load_w,
+                             self.payload.total_science_data_generated_mb)
         # Final flush to ensure any remaining rows are written
         self.logger.flush_telemetry()
 
@@ -5452,13 +5471,27 @@ class ANTARAScienceSimulator:
         )
 
         # Read back flushed telemetry CSV (since telemetry_rows was cleared by flushes)
+        telemetry_sampled = False
         if self.logger._flush_path and self.logger._flush_path.exists():
-            telemetry_df = pd.read_csv(self.logger._flush_path)
+            summary = streaming_summary(self.logger._flush_path)
+            summary["science_generated_mb"] = self.payload.total_science_data_generated_mb
+            summary["science_downlinked_mb"] = self.communications.total_downlinked_mb
+            summary["flux_source"] = "configured_baseline_not_live_AP9"
+            summary_path = results_path("science", f"{self.config.output_tag + '_' if self.config.output_tag else ''}ANTARA_Science_summary.json")
+            with open(summary_path, "w") as stream:
+                json.dump(summary, stream, indent=2)
+            print(f"Elapsed-time summary: {summary_path} | {summary['rows']} rows | {summary['duration_sec']:g} s")
+            print(f"Mode durations (s): {summary['mode_seconds']}")
+            if not self.config.no_plots:
+                telemetry_df, telemetry_sampled = plotting_sample(self.logger._flush_path)
+                if telemetry_sampled:
+                    print("Figures use at most 5000 display samples; exact scalar statistics are in the summary JSON.")
         else:
             # Fallback: rebuild from remaining in-memory rows (should be small)
             telemetry_df = pd.DataFrame(self.logger.telemetry_rows)
 
-        telemetry_df.to_csv(results_path("science", f"{self.config.output_tag + '_' if self.config.output_tag else ''}ANTARA_Science_telemetry.csv"), index=False)
+        # Incremental telemetry is already complete. Rewriting via pandas can
+        # change float formatting in its prefix and invalidate saved checkpoints.
         saa_passes_df.to_csv(results_path("science", f"{self.config.output_tag + '_' if self.config.output_tag else ''}ANTARA_Science_saa_passes.csv"), index=False)
         gs_contacts_df.to_csv(results_path("science", f"{self.config.output_tag + '_' if self.config.output_tag else ''}ANTARA_Science_gs_contacts.csv"), index=False)
         mode_transitions_df.to_csv(results_path("science", f"{self.config.output_tag + '_' if self.config.output_tag else ''}ANTARA_Science_mode_transitions.csv"), index=False)
@@ -5478,13 +5511,13 @@ class ANTARAScienceSimulator:
             self._plot_results(telemetry_df, saa_passes_df, gs_contacts_df, slew_events_df)
             self._plot_science_results(telemetry_df, saa_passes_df)
             self._plot_attitude_diagnostics(telemetry_df)
-        self._print_summary(
-            telemetry_df,
-            saa_passes_df,
-            gs_contacts_df,
-            mode_transitions_df,
-            slew_events_df,
-        )
+        if not self.config.no_plots and not telemetry_sampled:
+            self._print_summary(
+                telemetry_df, saa_passes_df, gs_contacts_df,
+                mode_transitions_df, slew_events_df,
+            )
+        self._run_finished = True
+        self._at_step_boundary = True
 
         # Final relay diagnostics
         for window, rows in relay_window_diagnostics.items():
@@ -5513,168 +5546,13 @@ class ANTARAScienceSimulator:
             )
 
     def run_steps(self, n_steps: int) -> None:
-        """Run the simulation for a specific number of steps.
+        """Advance at most n_steps using the production loop, without exceeding the horizon."""
+        if isinstance(n_steps, bool) or not isinstance(n_steps, int) or n_steps < 0:
+            raise ValueError("n_steps must be a nonnegative integer")
+        if n_steps:
+            with self._checkpoint_lock:
+                self._run_simulation(n_steps)
 
-        Useful for checkpoint testing where we need to advance by a fixed step count.
-        """
-        step_sec = self.config.step_sec
-        coarse_step_sec = getattr(self.config, 'coarse_step_sec', step_sec)
-        time_sec = getattr(self, 'time_sec', 0.0)
-
-        if time_sec == 0.0:
-            # First run: initialize telemetry flush path
-            telemetry_csv_path = results_path("science", f"{self.config.output_tag + '_' if self.config.output_tag else ''}ANTARA_Science_telemetry.csv")
-            self.logger.set_flush_path(telemetry_csv_path)
-
-        for _ in range(n_steps):
-            current_mode = self.fsm.current_mode
-            absolute_date = self.start_date.shiftedBy(time_sec)
-            propagated_state = self._propagate_state(absolute_date)
-            orbit_state = self._build_orbit_state(propagated_state, time_sec)
-
-            gs_geometry = self._ground_station_geometry(orbit_state)
-            gs_elevation_deg = gs_geometry.selected_elevation_deg
-            gs_visible = gs_geometry.visible
-
-            inside_saa = self.saa.is_inside(orbit_state.latitude_deg, orbit_state.longitude_deg)
-            sun_visible = not orbit_state.in_eclipse
-            illumination_fraction = self._update_illumination_fraction(sun_visible, time_sec)
-
-            self.fsm.set_time(time_sec)
-            self.adcs.set_time(time_sec)
-
-            if self.fsm.current_mode == "SLEWING" and time_sec >= self.slew_end_time_sec:
-                try:
-                    self._complete_slew_transition(time_sec)
-                except IllegalFSMTransitionError as exc:
-                    self.fsm.record_rejected_transition("SLEWING", self.target_mode, str(exc))
-                    self.logger.log_rejected_transition(
-                        {
-                            "time_sec": time_sec,
-                            "from_mode": "SLEWING",
-                            "to_mode": self.target_mode,
-                            "reason": str(exc),
-                        }
-                    )
-
-            self._update_attitude_guidance(
-                current_mode,
-                orbit_state,
-                sun_visible,
-                gs_visible,
-                self.eps.battery_wh,
-                step_sec,
-                time_sec,
-            )
-            startup_allows_charging = current_mode not in {"COLD_AND_DARK", "DETUMBLE"}
-            self.eps.compute_solar_power(
-                self.current_sun_incidence_angle_deg,
-                illumination_fraction if startup_allows_charging else 0.0,
-            )
-            self.eps.compute_load(
-                current_mode,
-                self.adcs.is_slewing,
-                not sun_visible,
-                payload_pending=(current_mode == "SLEWING" and self.target_mode == "DETECTION"),
-            )
-
-            self.eps.step(step_sec)
-
-            self._update_alignment_telemetry(orbit_state, gs_visible)
-
-            # FSM evaluation
-            adcs_saturation_hold = self.adcs.saturation_hold_active
-            saturation_hold_dur = self.adcs.get_saturation_hold_duration_sec()
-            pointing_budget_err = self.adcs.get_pointing_error_deg()
-            pointing_budget_lim = self.config.safe_hold_deadband_deg
-            detumble_done = self.adcs.detumble_complete
-
-            next_mode, reason = self.fsm.evaluate(
-                battery_wh=self.eps.battery_wh,
-                gs_visible=gs_visible,
-                inside_saa=inside_saa,
-                adcs_saturation_hold_active=adcs_saturation_hold,
-                saturation_hold_duration_sec=saturation_hold_dur,
-                pointing_budget_error_deg=pointing_budget_err,
-                pointing_budget_limit_deg=pointing_budget_lim,
-                detumble_complete=detumble_done,
-            )
-
-            requested_mode = next_mode
-            if requested_mode != current_mode:
-                try:
-                    self.fsm.transition(requested_mode, reason)
-                    if requested_mode == "SLEWING":
-                        self.slew_start_time_sec = time_sec
-                        self.slew_end_time_sec = time_sec + self.adcs.slew_time_remaining_sec
-                        self.logger.log_slew_event(
-                            start_time_sec=time_sec,
-                            from_mode=current_mode,
-                            target_mode=requested_mode,
-                            angle_deg=self.adcs.slew_angle_deg,
-                            estimated_duration_sec=self.adcs.slew_time_remaining_sec,
-                        )
-                    elif current_mode == "DETUMBLE" and requested_mode == "SUN_POINTING":
-                        self.logger.log_detumble_event(
-                            start_time_sec=time_sec,
-                            from_mode=current_mode,
-                            target_attitude_label=self.config.detumble_target_attitude_label,
-                            initial_body_rate_deg_sec=self.adcs.initial_body_rate_deg_sec,
-                            initial_body_accel_deg_sec2=self.adcs.initial_body_accel_deg_sec2,
-                            goal="Physics detumble complete",
-                        )
-                except IllegalFSMTransitionError as exc:
-                    self.fsm.record_rejected_transition(
-                        current_mode,
-                        requested_mode,
-                        f"{exc} | reason={reason}",
-                    )
-                    self.logger.log_rejected_transition(
-                        {
-                            "time_sec": time_sec,
-                            "from_mode": current_mode,
-                            "to_mode": requested_mode,
-                            "reason": f"{exc} | reason={reason}",
-                        }
-                    )
-
-            # Update ADCS
-            if current_mode == "DETUMBLE" and not self.adcs.detumble_complete:
-                b_body_t = self._compute_earth_b_field_body(orbit_state)
-                self.adcs.step_detumble(b_body_t, step_sec)
-            elif self.adcs.is_slewing:
-                self.adcs.advance(step_sec)
-            else:
-                self.adcs.advance(step_sec)
-
-            # Log telemetry
-            self.logger.log_step({
-                "time_sec": time_sec,
-                "lat_deg": orbit_state.latitude_deg,
-                "lon_deg": orbit_state.longitude_deg,
-                "alt_km": orbit_state.altitude_km,
-                "mode": self.fsm.current_mode,
-                "battery_wh": self.eps.battery_wh,
-                "solar_w": self.eps.solar_generation_w,
-                "load_w": self.eps.load_w,
-                "in_sunlight": sun_visible,
-                "in_saa": inside_saa,
-                "gs_visible": gs_visible,
-                "slew_angle_deg": self.adcs.slew_angle_deg,
-                "wheel_mom_x": self.adcs.wheel_momentum_nms[0],
-                "wheel_mom_y": self.adcs.wheel_momentum_nms[1],
-                "wheel_mom_z": self.adcs.wheel_momentum_nms[2],
-                "pointing_error_deg": self.adcs.get_pointing_error_deg(),
-                "storage_mb": self._get_total_storage_mb(),
-                "science_data_mb": self.payload.total_science_data_generated_mb,
-                "downlinked_mb": self.communications.total_downlinked_mb,
-                "sun_visible": sun_visible,
-            })
-
-            time_sec += step_sec
-            self.time_sec = time_sec
-
-        self.logger.flush_telemetry()
 
 def _parse_args(argv=None) -> argparse.Namespace:
     """Parse the lightweight CLI for DITL run controls."""
@@ -5723,25 +5601,16 @@ if __name__ == "__main__":
     config, skip_leop = _config_from_args(args)
 
     if args.resume_from:
+        if (args.scenario is not None or args.duration_hours is not None or args.step_sec is not None
+                or args.coarse_step_sec is not None or args.rng_seed is not None or args.no_periphery_merge):
+            raise ValueError("Resume uses checkpoint configuration; do not combine it with scenario/physics overrides")
         print(f"[Resume] Loading checkpoint from {args.resume_from}")
-        sim = ANTARAScienceSimulator.load_checkpoint(args.resume_from, config)
+        sim = ANTARAScienceSimulator.load_checkpoint(args.resume_from)
+        if args.no_plots:
+            sim.config.no_plots = True
     else:
         sim = ANTARAScienceSimulator(config, skip_leop=skip_leop)
 
-    # Set up periodic checkpointing if requested
-    if args.checkpoint_every_hours:
-        import threading
-        def checkpoint_loop(sim_instance, interval_hours):
-            while True:
-                import time
-                time.sleep(interval_hours * 3600)
-                try:
-                    ckpt_path = Path(f"checkpoint_{int(sim_instance.time_sec//3600)}h.pkl")
-                    sim_instance.save_checkpoint(ckpt_path)
-                    print(f"[Checkpoint] Saved to {ckpt_path}")
-                except Exception as e:
-                    print(f"[Checkpoint] Failed: {e}")
-        t = threading.Thread(target=checkpoint_loop, args=(sim, args.checkpoint_every_hours), daemon=True)
-        t.start()
-
+    if args.checkpoint_every_hours is not None:
+        sim.configure_checkpointing(args.checkpoint_every_hours)
     sim.run()

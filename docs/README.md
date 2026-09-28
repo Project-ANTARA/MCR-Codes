@@ -1,5 +1,13 @@
 # ANTARA Mission Analysis — Source Code Documentation
 
+Latest integrated Science checks: [September 28 short operational verification](SHORT_OPERATIONAL_VERIFICATION.md), covering moving-LOS acquisition, interval slew energy and the nominal-frame Sun-side reversal defect. These are not annual acceptance or absolute payload calibration.
+
+The follow-up adds a real natural SAA exit and two-station handover/restart. Station switches now trigger reacquisition, and operational angles use stable `atan2` evaluation.
+
+Latest Master-specific follow-up: [September 28 interval-weighted reporting](MASTER_INTERVAL_REPAIR.md). This has short-run verification, not full mission acceptance.
+
+Current behavior changes and verification: [September 27 telemetry integrity](TELEMETRY_INTEGRITY_REPAIR.md), [wheel-event repair](../WHEEL_EVENT_REPAIR.md) and [September 25 audit repairs](AUDIT_REPAIRS_2026-09-25.md). Earlier module/report dates below retain their historical scope.
+
 Maintained module guides for `src/`, reviewed on 2026-09-12. The operational entrypoints, supporting studies, and shared models have different configurations and validation scope; a Science fix does not automatically update another simulator. Guides cover:
 - File overview & role
 - Dependencies

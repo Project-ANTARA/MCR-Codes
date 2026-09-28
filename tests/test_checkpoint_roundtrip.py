@@ -1,203 +1,123 @@
-#!/usr/bin/env python3
-"""
-Checkpoint Round-trip Test.
-
-Tests that save_checkpoint() and load_checkpoint() preserve simulator state correctly.
-
-Test procedure:
-1. Build simulator with config
-2. Run 50 steps
-3. save_checkpoint()
-4. Load checkpoint into NEW instance
-5. Assert state at checkpoint (step 50) matches exactly
-6. Verify both can continue running (smoke test)
-"""
-
-from __future__ import annotations
-
-import os
-import sys
-import tempfile
-import numpy as np
-
-# Add src to path
-sys.path.insert(0, str(os.path.join(os.path.dirname(__file__), "..", "src")))
-
-from ANTARA_Science_Sim import MissionConfig, ANTARAScienceSimulator
-
-
-def run_test():
-    """Run the checkpoint round-trip test."""
-    print("=" * 70)
-    print("CHECKPOINT ROUND-TRIP TEST")
-    print("=" * 70)
-    
-    # Create config with shorter duration for testing
-    config = MissionConfig(
-        sim_duration_hours=1.0,  # 1 hour = 1800 steps at 2s
-        step_sec=2.0,
-        output_tag="checkpoint_test",
-    )
-    
-    # Build simulator
-    print("\n1. Building simulator...")
-    sim = ANTARAScienceSimulator(config)
-    
-    # Run 50 steps
-    print("\n2. Running 50 steps...")
-    sim.run_steps(50)
-    
-    # Record state at step 50 (checkpoint point)
-    state_50 = {
-        "time_sec": sim.time_sec,
-        "battery_wh": sim.eps.battery_wh,
-        "fsm_mode": sim.fsm.current_mode,
-        "adcs_quaternion": sim.adcs.current_quaternion.copy(),
-        "adcs_target_quaternion": sim.adcs.target_quaternion.copy(),
-        "adcs_continuity_corrections": sim.adcs.quaternion_continuity_corrections,
-        "adcs_continuity_by_site": sim.adcs.quaternion_continuity_corrections_by_site.copy(),
-        "adcs_wheel_momentum": sim.adcs.wheel_momentum_nms.copy(),
-        "adcs_body_rate": sim.adcs.body_rate_deg_sec.copy(),
-        "science_storage_mb": sim.science_storage_mb,
-    }
-    print(f"   State at step 50: time={state_50['time_sec']:.1f}s, "
-          f"battery={state_50['battery_wh']:.3f}Wh, "
-          f"mode={state_50['fsm_mode']}, "
-          f"storage={state_50['science_storage_mb']:.3f}MB")
-    
-    # Save checkpoint
-    print("\n3. Saving checkpoint...")
-    with tempfile.NamedTemporaryFile(suffix=".pkl", delete=False) as f:
-        ckpt_path = f.name
-    sim.save_checkpoint(ckpt_path)
-    print(f"   Checkpoint saved to {ckpt_path}")
-    
-    # Load checkpoint into NEW instance
-    print("\n4. Loading checkpoint into NEW instance...")
-    sim2 = ANTARAScienceSimulator.load_checkpoint(ckpt_path, config)
-    
-    # Record state immediately after load (should be identical to state_50)
-    state_50_restored = {
-        "time_sec": sim2.time_sec,
-        "battery_wh": sim2.eps.battery_wh,
-        "fsm_mode": sim2.fsm.current_mode,
-        "adcs_quaternion": sim2.adcs.current_quaternion.copy(),
-        "adcs_target_quaternion": sim2.adcs.target_quaternion.copy(),
-        "adcs_continuity_corrections": sim2.adcs.quaternion_continuity_corrections,
-        "adcs_continuity_by_site": sim2.adcs.quaternion_continuity_corrections_by_site.copy(),
-        "adcs_wheel_momentum": sim2.adcs.wheel_momentum_nms.copy(),
-        "adcs_body_rate": sim2.adcs.body_rate_deg_sec.copy(),
-        "science_storage_mb": sim2.science_storage_mb,
-    }
-    print(f"   State at step 50 (restored): time={state_50_restored['time_sec']:.1f}s, "
-          f"battery={state_50_restored['battery_wh']:.3f}Wh, "
-          f"mode={state_50_restored['fsm_mode']}, "
-          f"storage={state_50_restored['science_storage_mb']:.3f}MB")
-    
-    # Compare states at checkpoint (should be IDENTICAL)
-    print("\n5. Comparing states at checkpoint (step 50)...")
-    tolerance = 1e-10  # tight tolerance for exact round-trip
-    all_pass = True
-    
-    # time_sec
-    time_diff = abs(state_50["time_sec"] - state_50_restored["time_sec"])
-    print(f"   time_sec: diff={time_diff:.6f}s {'PASS' if time_diff < tolerance else 'FAIL'}")
-    all_pass &= time_diff < tolerance
-    
-    # battery_wh
-    battery_diff = abs(state_50["battery_wh"] - state_50_restored["battery_wh"])
-    print(f"   battery_wh: diff={battery_diff:.6f}Wh {'PASS' if battery_diff < tolerance else 'FAIL'}")
-    all_pass &= battery_diff < tolerance
-    
-    # fsm_mode
-    mode_match = state_50["fsm_mode"] == state_50_restored["fsm_mode"]
-    print(f"   fsm_mode: original={state_50['fsm_mode']}, "
-          f"restored={state_50_restored['fsm_mode']} {'PASS' if mode_match else 'FAIL'}")
-    all_pass &= mode_match
-    
-    # adcs_quaternion
-    quat_diff = np.max(np.abs(state_50["adcs_quaternion"] - state_50_restored["adcs_quaternion"]))
-    print(f"   adcs_current_quaternion: max diff={quat_diff:.6f} {'PASS' if quat_diff < tolerance else 'FAIL'}")
-    all_pass &= quat_diff < tolerance
-    
-    # adcs_target_quaternion
-    target_quat_diff = np.max(np.abs(state_50["adcs_target_quaternion"] - state_50_restored["adcs_target_quaternion"]))
-    print(f"   adcs_target_quaternion: max diff={target_quat_diff:.6f} {'PASS' if target_quat_diff < tolerance else 'FAIL'}")
-    all_pass &= target_quat_diff < tolerance
-    
-    # continuity_corrections
-    continuity_match = state_50["adcs_continuity_corrections"] == state_50_restored["adcs_continuity_corrections"]
-    print(f"   continuity_corrections: original={state_50['adcs_continuity_corrections']}, "
-          f"restored={state_50_restored['adcs_continuity_corrections']} {'PASS' if continuity_match else 'FAIL'}")
-    all_pass &= continuity_match
-    
-    # continuity_by_site
-    by_site_match = state_50["adcs_continuity_by_site"] == state_50_restored["adcs_continuity_by_site"]
-    print(f"   continuity_by_site: {'PASS' if by_site_match else 'FAIL'}")
-    all_pass &= by_site_match
-    
-    # wheel_momentum
-    wheel_diff = np.max(np.abs(state_50["adcs_wheel_momentum"] - state_50_restored["adcs_wheel_momentum"]))
-    print(f"   wheel_momentum: max diff={wheel_diff:.6f} {'PASS' if wheel_diff < tolerance else 'FAIL'}")
-    all_pass &= wheel_diff < tolerance
-    
-    # body_rate
-    rate_diff = np.max(np.abs(state_50["adcs_body_rate"] - state_50_restored["adcs_body_rate"]))
-    print(f"   body_rate: max diff={rate_diff:.6f} {'PASS' if rate_diff < tolerance else 'FAIL'}")
-    all_pass &= rate_diff < tolerance
-    
-    # science_storage_mb
-    storage_diff = abs(state_50["science_storage_mb"] - state_50_restored["science_storage_mb"])
-    print(f"   science_storage_mb: diff={storage_diff:.6f}MB {'PASS' if storage_diff < tolerance else 'FAIL'}")
-    all_pass &= storage_diff < tolerance
-    
-    # Now test that both can continue running (smoke test)
-    print("\n6. Running additional 20 steps on both (smoke test)...")
-    sim.run_steps(20)
-    sim2.run_steps(20)
-    
-    # Compare after additional steps (looser tolerance for numerical integration differences)
-    print("\n7. Comparing states after 20 additional steps (looser tolerance)...")
-    loose_tol = 1e-3  # 0.001 for numerical integration differences
-    all_pass2 = True
-    
-    # fsm_mode should match exactly
-    mode_match2 = sim.fsm.current_mode == sim2.fsm.current_mode
-    print(f"   fsm_mode: original={sim.fsm.current_mode}, restored={sim2.fsm.current_mode} {'PASS' if mode_match2 else 'FAIL'}")
-    all_pass2 &= mode_match2
-    
-    # battery_wh should be close
-    battery_diff2 = abs(sim.eps.battery_wh - sim2.eps.battery_wh)
-    print(f"   battery_wh: diff={battery_diff2:.6f}Wh {'PASS' if battery_diff2 < loose_tol else 'FAIL'}")
-    all_pass2 &= battery_diff2 < loose_tol
-    
-    # time_sec should match exactly (same number of steps)
-    time_diff2 = abs(sim.time_sec - sim2.time_sec)
-    print(f"   time_sec: diff={time_diff2:.6f}s {'PASS' if time_diff2 < tolerance else 'FAIL'}")
-    all_pass2 &= time_diff2 < tolerance
-    
-    overall_pass = all_pass and all_pass2
-    
-    # Cleanup
-    try:
-        os.unlink(ckpt_path)
-        for ext in ['.json', '.npz']:
-            alt_path = ckpt_path.replace('.pkl', ext)
-            if os.path.exists(alt_path):
-                os.unlink(alt_path)
-    except:
-        pass
-    
-    print("\n" + "=" * 70)
-    if overall_pass:
-        print("RESULT: ALL TESTS PASSED")
-    else:
-        print("RESULT: SOME TESTS FAILED")
-    print("=" * 70)
-    
-    return overall_pass
-
-
+"""Collected checkpoint safety checks (also runnable as a standalone script)."""
 if __name__ == "__main__":
-    success = run_test()
-    sys.exit(0 if success else 1)
+    # Start pytest before loading Orekit/JVM-backed modules. Re-entering pytest
+    # inside an already initialized wrapper process can crash native bindings.
+    import os
+    import sys
+    os.execv(sys.executable, [sys.executable, "-m", "pytest", __file__, "-v", "--disable-warnings"])
+
+from dataclasses import replace
+import pickle
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
+import numpy as np
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+from test_execution_integrity import config, science
+
+
+def test_checkpoint_write_failure_preserves_previous(config, tmp_path):
+    sim = science.ANTARAScienceSimulator(config)
+    path = tmp_path / "state.pkl"
+    sim.save_checkpoint(path)
+    original = path.read_bytes()
+    sim.warning_state["unserializable"] = lambda: None
+    with pytest.raises((pickle.PicklingError, AttributeError)):
+        sim.save_checkpoint(path)
+    assert path.read_bytes() == original
+
+
+def test_checkpoint_prefix_integrity_and_config(config, tmp_path):
+    sim = science.ANTARAScienceSimulator(config, skip_leop=True)
+    sim.run_steps(1)
+    path = tmp_path / "state.pkl"
+    sim.save_checkpoint(path)
+    with pytest.raises(ValueError, match="configuration"):
+        science.ANTARAScienceSimulator.load_checkpoint(path, replace(config, step_sec=4.))
+    sim.logger._flush_path.write_bytes(b"corrupt")
+    with pytest.raises(ValueError, match="prefix"):
+        science.ANTARAScienceSimulator.load_checkpoint(path, replace(config, output_tag="resumed"))
+    assert not (tmp_path / "resumed_ANTARA_Science_telemetry.csv").exists()
+
+
+def test_checkpoint_only_copies_saved_prefix(config, tmp_path):
+    sim = science.ANTARAScienceSimulator(config, skip_leop=True)
+    sim.run_steps(1)
+    path = tmp_path / "state.pkl"
+    sim.save_checkpoint(path)
+    prefix = sim.logger._flush_path.read_bytes()
+    sim.run()
+    longer = sim.logger._flush_path.read_bytes()
+    assert len(longer) > len(prefix)
+    resumed = science.ANTARAScienceSimulator.load_checkpoint(path)
+    assert resumed.logger._flush_path != sim.logger._flush_path
+    assert resumed.logger._flush_path.read_bytes() == prefix
+    assert sim.logger._flush_path.read_bytes() == longer
+    assert resumed.time_sec == 2.
+
+
+@pytest.mark.parametrize("version", [None, 2, 3, 4, 5, 6])
+def test_legacy_checkpoint_rejected(config, tmp_path, version):
+    path = tmp_path / "legacy.pkl"
+    path.write_bytes(pickle.dumps({"version": version, "time_sec": 123.}))
+    with pytest.raises(ValueError, match="version-7"):
+        science.ANTARAScienceSimulator.load_checkpoint(path, config)
+
+
+def test_checkpoint_rejects_partial_step(config, tmp_path):
+    sim = science.ANTARAScienceSimulator(config)
+    sim._at_step_boundary = False
+    with pytest.raises(RuntimeError, match="incomplete"):
+        sim.save_checkpoint(tmp_path / "unsafe.pkl")
+
+
+def test_checkpoint_preserves_inflight_slew_profile(config, tmp_path):
+    sim = science.ANTARAScienceSimulator(config)
+    sim.adcs.set_initial_quaternion(np.array([1., 0., 0., 0.]))
+    target = sim.adcs.quaternion_from_axis_angle(np.array([0., 0., 1.]), 30.)
+    sim.adcs.command_attitude(target, "SLEWING", "restart probe", force_update=True)
+    sim.adcs.advance(.1)
+    path = tmp_path / "slew.pkl"
+    sim.save_checkpoint(path)
+    resumed = science.ANTARAScienceSimulator.load_checkpoint(path)
+    np.testing.assert_array_equal(resumed.adcs.slew_axis_inertial, sim.adcs.slew_axis_inertial)
+    np.testing.assert_array_equal(resumed.adcs.estimate_torque_vector(), sim.adcs.estimate_torque_vector())
+    for adcs in (sim.adcs, resumed.adcs):
+        adcs.advance(.2)
+    np.testing.assert_array_equal(resumed.adcs.current_quaternion, sim.adcs.current_quaternion)
+    assert resumed.adcs.current_slew_rate_deg_sec == sim.adcs.current_slew_rate_deg_sec
+
+
+def test_periodic_checkpoint_uses_simulation_time(config, tmp_path):
+    sim = science.ANTARAScienceSimulator(config, skip_leop=True)
+    sim.configure_checkpointing(2. / 3600.)
+    sim.run_steps(1)
+    path = tmp_path / "reference_2.000000s.pkl"
+    assert path.exists()
+    restored = science.ANTARAScienceSimulator.load_checkpoint(path)
+    assert restored.time_sec == 2.
+    assert restored._next_checkpoint_sec == 4.
+
+
+def test_cli_checkpoint_resumes_in_another_process(tmp_path):
+    import pandas as pd
+    root = tmp_path / "cli"
+    source_dir = Path(__file__).resolve().parents[1] / "src"
+    script = (
+        f"import sys; sys.path.insert(0, {str(source_dir)!r}); "
+        "import paths,runpy; from pathlib import Path; "
+        f"paths.RESULTS_DIR=Path({str(root)!r}); "
+        "sys.argv=['ANTARA_Science_Sim.py']+sys.argv[1:]; "
+        "runpy.run_path('src/ANTARA_Science_Sim.py',run_name='__main__')"
+    )
+    subprocess.run([sys.executable, "-c", script, "--duration-hours", str(6/3600),
+                    "--step-sec", "2", "--checkpoint-every-hours", str(2/3600), "--no-plots"],
+                   check=True, capture_output=True, text=True, timeout=120)
+    checkpoint = root / "checkpoints/science_2.000000s.pkl"
+    subprocess.run([sys.executable, "-c", script, "--resume-from", str(checkpoint), "--no-plots"],
+                   check=True, capture_output=True, text=True, timeout=120)
+    original = pd.read_csv(root / "science/ANTARA_Science_telemetry.csv")
+    restored = pd.read_csv(next((root / "science").glob("science_resume_*_ANTARA_Science_telemetry.csv")))
+    pd.testing.assert_frame_equal(original, restored, check_exact=False, rtol=1e-8, atol=1e-8)

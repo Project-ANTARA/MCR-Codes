@@ -40,7 +40,9 @@ Results retain seeded trial order, regardless of process completion order. Modul
 
 The analysis writes `detumble_mc_summary.csv` and success heatmap/contour, completion-time, per-axis, and wheel-momentum plots. A fitted contour may be unavailable when samples do not support a fit. Do not treat a tiny or deliberately time-limited dispatch test as a hardware capability estimate.
 
-Physics limitations remain: synthetic field geometry rather than propagated IGRF, sampled acceleration parallel to the sampled rate direction, and no full mission/EPS/FSM coupling. The baseline has a 10,000-second cap when no timeout is supplied. If it fails, the current derived timeout can become infinite; use an explicit finite timeout for such configurations. Progress does not change trial physics or fix these modeling limitations.
+September 25 semantics: trials sample **rates only**. Acceleration is derived from torque, not an independent initial state; direct nonzero `accel0` arguments raise an explanatory error. This removes the ineffective, correlated acceleration sweep rather than inventing a disturbance duration. The analysis produces a rate-only success plot and skips the unidentifiable 2D logistic fit.
+
+Trials integrate reaction-wheel momentum without assumed unloading; exceeding capacity fails the trial with `failure_reason`. Rate divergence also fails instead of clipping rates. Steps/timeouts must be finite and positive. A failed baseline leaves a finite 10,000-second trial timeout. Progress reports total `Failed`; the final summary distinguishes timeouts from capacity/numerical failures, and analysis CSV includes `failure_reason`. Synthetic field geometry and lack of full mission/EPS/FSM coupling remain limitations. These results are not directly comparable to historical zero-wheel-momentum capability estimates.
 
 ## Verification
 

@@ -1,10 +1,24 @@
 # ANTARA_Master.py
 
-## Current scope (2026-09-12)
+## Current scope (2026-09-28)
 
 Source: [ANTARA_Master.py](../src/ANTARA_Master.py). This is an independent 12-hour simulator with local config, ADCS, EPS, and FSM definitions. Science's 60-hour recovery verification does not validate Master, and its main loop still comments out `_validate_attitude_metrics()`. Use the [Science guide](ANTARA_Science_Sim.md) for current scenario/recovery behavior; do not infer parity from similar class names.
 
 Setup and navigation: [repository README](../README.md) · [documentation index](README.md). Supporting study results were not rerun as part of this documentation review.
+
+Master telemetry now records `interval_duration_sec` and `state_time_sec` for
+every integrated row. Geometry/mode are sampled at `time_sec`; integrated state
+is at `state_time_sec`. Wheel events and horizon clipping may shorten steps.
+Unlike Science, Master does not append a separate zero-duration terminal row;
+the last row's end-state time reaches the horizon. Do not infer its final duration
+from a nonexistent following row or feed it to the Science-comparison CLI.
+
+Time-based summary means, ADCS/eclipse fractions and SUN_POINTING submode durations
+use actual interval weights. Extrema and per-event slew averages retain their
+original meaning. Summaries require interval metadata whose durations cover the
+configured horizon. This repair changes reporting, not orbital/ADCS dynamics;
+see [Master verification](MASTER_INTERVAL_REPAIR.md). Remaining sections retain
+their earlier module-reference scope.
 
 ## File Overview
 High-fidelity simulation entry point for the ANTARA 3U CubeSat mission. Implements a full numerical propagation loop with Orekit (Dormand-Prince 8/5/3 integrator), a 7-state spacecraft FSM (COLD_AND_DARK, DETUMBLE, SAFE, SLEWING, SUN_POINTING, DETECTION, RELAY), detailed ADCS model with reaction wheels and magnetorquers, EPS model with battery taper charging, SAA polygon detection, ground station elevation-based visibility, science payload data generation, and communications downlink. Produces comprehensive telemetry CSVs and a 9-panel PDR plot suite.
@@ -75,7 +89,7 @@ Manages attitude state, slew dynamics, reaction wheel momentum, and detumble.
 - `compute_slew(prev_q, new_q) -> Tuple[float, float]` — Slew angle (deg) and duration (sec) with trapezoidal profile
 - `command_attitude(target_q, mode, reason, force_update=False, deadband_deg=None) -> bool` — Update target if beyond deadband
 - `advance(dt_sec: float) -> None` — Advance attitude toward target with rate/accel limits
-- `estimate_torque_vector() -> np.ndarray` — Wheel torque demand from commanded Euler delta
+- `estimate_torque_vector() -> np.ndarray` — Cached body-axis slew torque proxy (not diagnostic Euler deltas)
 - `update_wheel_momentum(torque_vec, dt_sec, unload_scale, b_projection_scale) -> None` — Integrate momentum + magnetorquer unload
 - `check_saturation() -> bool` — Check/set saturation flags, trigger hold/recovery
 - `get_saturation_hold_duration_sec() -> float` — Elapsed time in saturation hold
@@ -136,7 +150,7 @@ Downlink over GS_INDIA (active only in RELAY mode while GS visible).
 #### `TelemetryLogger`
 Pandas DataFrame-based recorder with 80+ telemetry columns per timestep + event DataFrames.
 **Methods**:
-- `log_step(...)` — Append one timestep (42 parameters)
+- `log_step(..., interval_duration_sec)` — Append one integrated interval and its end-state timestamp
 - `log_slew_event(start_time_sec, from_mode, target_mode, angle_deg, estimated_duration_sec, end_time_sec=None)`
 - `finalize_slew_event(event_index, end_time_sec)`
 - `log_detumble_event(...)`
@@ -226,5 +240,5 @@ Output: `results/master/` CSVs + `figures/master/ANTARA_7day_PDR_simulation.png`
 - **SAFE mode behavior**: Freezes current inertial attitude (no slew to nadir) to avoid wheel saturation from repeated large slews
 - **SUN_POINTING misnomer**: Despite name, does NOT track Sun — holds fixed RAM/nadir/orbit-normal inertial attitude; submodes (CHARGING/PASSIVE/ECLIPSE) are power-state labels only
 - **Geometric self-tests**: Runs at startup (`_run_geometric_self_tests`) to verify quaternion/DCM convention consistency
-- **Validation gate**: `_validate_attitude_metrics` commented out in main loop (line 3672) — can be enabled for debugging
+- **Validation gate**: `_validate_attitude_metrics` is active in the main loop after alignment telemetry is refreshed (source verified September 28). Do not disable it to make runs pass.
 - **Random seed**: Configurable via `MissionConfig.rng_seed` (default 42) for reproducible jitter

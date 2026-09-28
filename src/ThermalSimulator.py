@@ -372,9 +372,9 @@ class ThermalMissionConfig:
 
     def __post_init__(self) -> None:
         errors: List[str] = []
-        if self.sim_duration_hours <= 0.0:
+        if not math.isfinite(self.sim_duration_hours) or self.sim_duration_hours <= 0.0:
             errors.append(f"sim_duration_hours={self.sim_duration_hours} must be > 0")
-        if self.step_sec <= 0.0:
+        if not math.isfinite(self.step_sec) or self.step_sec <= 0.0:
             errors.append(f"step_sec={self.step_sec} must be > 0")
         if self.thermal_substeps_per_step < 1:
             errors.append(f"thermal_substeps_per_step={self.thermal_substeps_per_step} must be >= 1")
@@ -1032,13 +1032,6 @@ class ThermalSimulator:
             face_normals_inertial = self._build_face_normals(orbit_state, sun_unit_inertial, time_sec)
             fluxes = self._compute_face_fluxes(orbit_state, face_normals_inertial, sun_unit_inertial)
 
-            sub_time_sec = time_sec
-            for _ in range(substeps):
-                self.temperatures_k = self._rk4_thermal_step(
-                    self.temperatures_k, fluxes, orbit_state.in_eclipse, sub_time_sec, sub_dt_sec
-                )
-                sub_time_sec += sub_dt_sec
-
             row: Dict[str, float] = {
                 "time_sec": time_sec,
                 "time_hr": time_sec / 3600.0,
@@ -1074,7 +1067,16 @@ class ThermalSimulator:
                 )
                 next_progress_report_sec += self.config.progress_report_interval_sec
 
-            time_sec += step_sec
+            interval_sec = min(step_sec, final_time_sec - time_sec)
+            if interval_sec <= 0.0:
+                break
+            sub_dt_sec = interval_sec / substeps
+            for index in range(substeps):
+                self.temperatures_k = self._rk4_thermal_step(
+                    self.temperatures_k, fluxes, orbit_state.in_eclipse,
+                    time_sec + index * sub_dt_sec, sub_dt_sec,
+                )
+            time_sec = min(final_time_sec, time_sec + interval_sec)
 
         telemetry_df = pd.DataFrame(rows)
 

@@ -4,6 +4,7 @@ orekit.initVM()
 import os
 import math
 import random
+random = random.Random(42)  # Reproducible study-local generator.
 from paths import init_orekit_data
 
 # =========================
@@ -117,7 +118,8 @@ def run_simulation(test_raan):
     # Propagator
     integrator = DormandPrince853Integrator(0.1, 300.0, 1.0e-3, 1.0e-6)
     propagator = NumericalPropagator(integrator)
-    propagator.setInitialState(SpacecraftState(initialOrbit))
+    # Match the Science mission's explicit 3 kg spacecraft, not Orekit's 1000 kg default.
+    propagator.setInitialState(SpacecraftState(initialOrbit, 3.0))
     
     # Forces
     earthFrame = FramesFactory.getITRF(IERSConventions.IERS_2010, True)
@@ -177,7 +179,7 @@ best_raan = 0
 max_avg_power = 0
 
 # Loop from 0 to 360 in steps of 15 degrees
-for r in range(0, 361, 15):
+for r in range(0, 360, 15):
     avg, peak, ecl = run_simulation(float(r))
     results.append((r, avg, peak, ecl))
     
