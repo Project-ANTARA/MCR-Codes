@@ -217,8 +217,17 @@ def test_legacy_energy_balance_without_launching_study(name, target):
     assert eval(code, {}, dict(power_net=8., dt_hr=1., battery_eff=.8)) == pytest.approx(6.4)
 
 
-def test_checkpoint_mid_detection_conserves_pending_packets(monkeypatch, tmp_path):
+@pytest.mark.parametrize("checkpoint_version", [7, 8, 9])
+def test_checkpoint_mid_detection_conserves_pending_packets(monkeypatch, tmp_path, checkpoint_version):
     from dataclasses import replace
+    import pickle
+    from copy import deepcopy
+    captured = []
+    original_add = science.PassStatistics.add
+    def capture(self, record):
+        captured.append(deepcopy(record))
+        original_add(self, record)
+    monkeypatch.setattr(science.PassStatistics, "add", capture)
     monkeypatch.setattr(science, "results_path", lambda *parts: tmp_path / parts[-1])
     # Controlled SAA/attitude fixture, applied at class scope so snapshots do
     # not contain monkeypatched instance callables. All payload I/O is real.
@@ -237,9 +246,34 @@ def test_checkpoint_mid_detection_conserves_pending_packets(monkeypatch, tmp_pat
     assert sum(np.sum(v) for v in sim.payload._pending_bin_counts.values()) > 0.
     checkpoint = tmp_path / "pending.pkl"
     sim.save_checkpoint(checkpoint)
+    with checkpoint.open("rb") as stream:
+        saved = pickle.load(stream)
+    assert saved["version"] == 9
+    if checkpoint_version < 9:
+        saved["components"]["payload"]["pass_science_records"] = list(
+            saved["components"]["payload"]["pass_science_records"])
+    if checkpoint_version == 7:
+        # Reconstruct the prior payload schema with the actual first sample.
+        state = saved["components"]["payload"]
+        del state["_pass_statistics"]
+        state["_current_pass_records"] = deepcopy(captured)
+        for suffix, key in (("cell_ids", "cell_id"), ("event_types", "event_type"),
+                            ("livetime", "livetime_fraction"), ("sigma_fraction", "sigma_fraction"),
+                            ("counts_per_bin", "counts_per_bin"), ("region", "region")):
+            state["_current_pass_" + suffix] = [deepcopy(r[key]) for r in captured]
+    if checkpoint_version < 9:
+        saved["version"] = checkpoint_version
+        with checkpoint.open("wb") as stream:
+            pickle.dump(saved, stream)
     sim.run()
     resumed = science.ANTARAScienceSimulator.load_checkpoint(checkpoint, replace(config, output_tag="resumed"))
     resumed.run()
+    assert "_current_pass_records" not in vars(resumed.payload)
+    assert len(resumed.payload.pass_science_records) == len(sim.payload.pass_science_records)
+    for actual, expected in zip(resumed.payload.pass_science_records, sim.payload.pass_science_records):
+        for key in ("mean_pitch_angle_deg", "std_pitch_angle_deg", "mean_ew_factor",
+                    "mean_measured_flux", "mean_ap9_flux", "mean_sigma_fraction", "total_counts_per_bin"):
+            np.testing.assert_allclose(actual[key], expected[key], rtol=1e-13, atol=1e-14)
     for run in (sim, resumed):
         assert run.payload.total_science_data_generated_mb > 0.
         assert run.saa.completed_passes[0]["data_collected_mb"] == pytest.approx(run.payload.total_science_data_generated_mb)

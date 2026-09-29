@@ -109,11 +109,9 @@ def main():
         config.initial_body_rate_deg_sec_z,
     ], dtype=float)
     
-    accel0 = np.array([
-        config.initial_body_accel_deg_sec2_x,
-        config.initial_body_accel_deg_sec2_y,
-        config.initial_body_accel_deg_sec2_z,
-    ], dtype=float)
+    # Match the rate-only Monte Carlo baseline: acceleration follows actuator
+    # torque, not legacy mission tip-off acceleration configuration fields.
+    accel0 = np.zeros(3, dtype=float)
     
     # Run the trial (this uses the synthetic B-field model, no Orekit needed)
     trial_result: DetumbleTrialResult = run_single_trial(

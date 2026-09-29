@@ -66,11 +66,34 @@ def test_legacy_checkpoint_rejected(config, tmp_path, version):
         science.ANTARAScienceSimulator.load_checkpoint(path, config)
 
 
+@pytest.mark.parametrize("version", [7, 8, 9])
+def test_checkpoint_rejects_missing_pass_statistics(tmp_path, version):
+    path = tmp_path / "incomplete.pkl"
+    path.write_bytes(pickle.dumps({"version": version, "components": {"payload": {}}}))
+    with pytest.raises(ValueError, match="pass statistics"):
+        science.ANTARAScienceSimulator.load_checkpoint(path)
+
+
 def test_checkpoint_rejects_partial_step(config, tmp_path):
     sim = science.ANTARAScienceSimulator(config)
     sim._at_step_boundary = False
     with pytest.raises(RuntimeError, match="incomplete"):
         sim.save_checkpoint(tmp_path / "unsafe.pkl")
+
+
+def test_completed_pass_archive_checkpoint_branch(config, tmp_path):
+    sim = science.ANTARAScienceSimulator(config)
+    sim.payload.pass_science_records.append({"pass_index": 1})
+    path = tmp_path / "archive.pkl"
+    sim.save_checkpoint(path)
+    sim.payload.pass_science_records.append({"pass_index": 2})
+    resumed = science.ANTARAScienceSimulator.load_checkpoint(path)
+    assert list(resumed.payload.pass_science_records) == [{"pass_index": 1}]
+    resumed.payload.pass_science_records.append({"pass_index": 3})
+    assert sim.payload.pass_science_records[-1] == {"pass_index": 2}
+    sim.payload.pass_science_records.path.write_text("corrupt")
+    with pytest.raises(ValueError, match="prefix"):
+        science.ANTARAScienceSimulator.load_checkpoint(path)
 
 
 def test_checkpoint_preserves_inflight_slew_profile(config, tmp_path):

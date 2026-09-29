@@ -16,6 +16,7 @@ import hashlib
 import tempfile
 import threading
 import time
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -25,6 +26,8 @@ import orekit
 import pandas as pd
 from datetime import datetime, timedelta
 from simulations.helper.serialization import load_trusted_pickle
+from simulations.helper.pass_statistics import PassStatistics
+from simulations.helper.event_archive import EventArchive, write_event_csv
 from simulations.helper.paths import figures_path, init_orekit_data, results_path
 from simulations.helper.telemetry_metrics import interval_weights, weighted_mean, RunningRange, streaming_summary, plotting_sample
 
@@ -877,8 +880,9 @@ class PayloadModel:
         self.total_science_data_generated_mb = 0.0
         self.total_detection_seconds = 0.0
         self.last_flux_result: Dict[str, object] = {}
-        self.pass_science_records: List[Dict[str, object]] = []
-        self._current_pass_records: List[Dict[str, object]] = []
+        self.pass_science_records = EventArchive(results_path(
+            "science", f"proton_passes_{uuid.uuid4().hex}.jsonl"))
+        self._pass_statistics = PassStatistics()
         self._pass_open = False
         self._detection_steps_this_pass = 0
         # Event-driven snapshot state: counts accumulated PER CELL since that
@@ -892,12 +896,6 @@ class PayloadModel:
         self._cell_histograms: Dict[str, np.ndarray] = {}
         self._cell_pass_counts: Dict[str, int] = {}
         self._cell_total_counts: Dict[str, float] = {}
-        self._current_pass_cell_ids: List[str] = []
-        self._current_pass_event_types: List[str] = []
-        self._current_pass_livetime: List[float] = []
-        self._current_pass_sigma_fraction: List[np.ndarray] = []
-        self._current_pass_counts_per_bin: List[np.ndarray] = []
-        self._current_pass_region: List[str] = []
         self.layer_specs = (
             DetectorLayerSpec("Si", 1.0, 5.0, "silicon"),
             DetectorLayerSpec("L1", 2.0, 8.0, "scintillator"),
@@ -1180,33 +1178,20 @@ class PayloadModel:
 
         mean_livetime_fraction = self._mean_livetime_fraction(livetime_fractions)
         event_type = event_types[0] if event_types else "Type1"
-        self._current_pass_records.append(
+        self._pass_statistics.add(
             {
                 "region": region,
                 "cell_id": cell_id,
                 "event_type": event_type,
                 "pitch_angle_deg": pitch_deg,
                 "ew_factor": ew_factor,
-                "saa_depth": depth,
                 "livetime_fraction": mean_livetime_fraction,
-                "measured_flux": measured_flux.tolist(),
-                "ap9_flux": ap9_flux.tolist(),
-                "count_rate": total_count_rate.tolist(),
-                "counts_per_bin": accepted_counts.tolist(),
-                "sigma_fraction": sigma_fraction.tolist(),
-                "lat_deg": lat_deg,
-                "lon_deg": lon_deg,
-                "alt_km": alt_km,
-                "storm_time": storm_time,
-                "saa_state_at_sample": True,
+                "measured_flux": measured_flux,
+                "ap9_flux": ap9_flux,
+                "counts_per_bin": accepted_counts,
+                "sigma_fraction": sigma_fraction,
             }
         )
-        self._current_pass_cell_ids.append(cell_id)
-        self._current_pass_event_types.append(event_type)
-        self._current_pass_livetime.append(mean_livetime_fraction)
-        self._current_pass_sigma_fraction.append(sigma_fraction.copy())
-        self._current_pass_counts_per_bin.append(accepted_counts.copy())
-        self._current_pass_region.append(region)
         return data_mb, {
             "measured_flux": measured_flux,
             "ap9_flux": ap9_flux,
@@ -1235,13 +1220,7 @@ class PayloadModel:
     def open_saa_pass(self) -> None:
         """Reset the per-pass accumulation buffer at SAA entry."""
 
-        self._current_pass_records = []
-        self._current_pass_cell_ids = []
-        self._current_pass_event_types = []
-        self._current_pass_livetime = []
-        self._current_pass_sigma_fraction = []
-        self._current_pass_counts_per_bin = []
-        self._current_pass_region = []
+        self._pass_statistics = PassStatistics()
         self._detection_steps_this_pass = 0
         self._pass_open = True
 
@@ -1258,18 +1237,13 @@ class PayloadModel:
             flushed_mb += self._flush_cell_pending(pending_cell_id)
         self._previous_cell_id = None
 
-        if not self._current_pass_records:
+        if not self._pass_statistics.count:
             self._pass_open = False
             return flushed_mb
 
-        pitch_angles = [float(r["pitch_angle_deg"]) for r in self._current_pass_records]
-        ew_factors = [float(r["ew_factor"]) for r in self._current_pass_records]
-        count_stack = np.array([r["counts_per_bin"] for r in self._current_pass_records], dtype=float)
-        sigma_stack = np.array([r["sigma_fraction"] for r in self._current_pass_records], dtype=float)
-        n_science_steps = len(self._current_pass_records)
+        n_science_steps = self._pass_statistics.count
         n_steps = max(self._detection_steps_this_pass, n_science_steps)
         science_fraction = float(n_science_steps) / float(n_steps) if n_steps > 0 else 0.0
-        mean_livetime = float(np.mean(self._current_pass_livetime)) if self._current_pass_livetime else 1.0
 
         self.pass_science_records.append(
             {
@@ -1280,26 +1254,10 @@ class PayloadModel:
                 "n_steps": n_steps,
                 "n_science_steps": n_science_steps,
                 "science_fraction": science_fraction,
-                "mean_pitch_angle_deg": float(np.mean(pitch_angles)),
-                "std_pitch_angle_deg": float(np.std(pitch_angles)),
-                "mean_ew_factor": float(np.mean(ew_factors)),
-                "mean_livetime_fraction": mean_livetime,
-                "mean_measured_flux": np.mean(np.array([r["measured_flux"] for r in self._current_pass_records], dtype=float), axis=0).tolist(),
-                "mean_ap9_flux": np.mean(np.array([r["ap9_flux"] for r in self._current_pass_records], dtype=float), axis=0).tolist(),
-                "mean_sigma_fraction": np.mean(sigma_stack, axis=0).tolist(),
-                "total_counts_per_bin": count_stack.sum(axis=0).tolist(),
-                "cell_ids": sorted(set(self._current_pass_cell_ids)),
-                "event_types": sorted(set(self._current_pass_event_types)),
-                "region_histogram": {region: self._current_pass_region.count(region) for region in sorted(set(self._current_pass_region))},
+                **self._pass_statistics.summary(),
             }
         )
-        self._current_pass_records = []
-        self._current_pass_cell_ids = []
-        self._current_pass_event_types = []
-        self._current_pass_livetime = []
-        self._current_pass_sigma_fraction = []
-        self._current_pass_counts_per_bin = []
-        self._current_pass_region = []
+        self._pass_statistics = PassStatistics()
         self._detection_steps_this_pass = 0
         self._pass_open = False
         return flushed_mb
@@ -2120,7 +2078,7 @@ class ANTARAScienceSimulator:
                 prefix = {"path": str(source), "size": size, "sha256": digest.hexdigest()}
             excluded = self._CHECKPOINT_RUNTIME | set(self._CHECKPOINT_COMPONENTS)
             state = {
-                "version": 7, "config": self.config,
+                "version": 9, "config": self.config,
                 "simulation": {k: v for k, v in vars(self).items() if k not in excluded},
                 "components": {
                     name: {k: v for k, v in vars(getattr(self, name)).items() if k not in omit}
@@ -2147,7 +2105,7 @@ class ANTARAScienceSimulator:
 
     @classmethod
     def load_checkpoint(cls, path, config=None):
-        """Restore version-7 state into a fresh runtime and a separate telemetry file.
+        """Restore version-7/8/9 state into separate telemetry and event archives.
 
         Load only checkpoints you trust: pickle can execute Python code.
         Old incomplete pickle/JSON checkpoints are rejected, not guessed at.
@@ -2155,8 +2113,31 @@ class ANTARAScienceSimulator:
         from dataclasses import asdict, replace
         with Path(path).open("rb") as stream:
             state = load_trusted_pickle(stream)
-        if not isinstance(state, dict) or state.get("version") != 7:
-            raise ValueError("Unsupported/incomplete checkpoint; a version-7 checkpoint is required (nominal frame and slew energy changed)")
+        if not isinstance(state, dict) or state.get("version") not in (7, 8, 9):
+            raise ValueError("Unsupported/incomplete checkpoint; a version-7, version-8 or version-9 checkpoint is required (nominal frame and slew energy changed)")
+        payload_state = state.get("components", {}).get("payload")
+        if not isinstance(payload_state, dict):
+            raise ValueError("Checkpoint is missing payload pass statistics")
+        if state["version"] == 7:
+            payload_state = dict(payload_state)
+            if not isinstance(payload_state.get("_current_pass_records"), list):
+                raise ValueError("Checkpoint is missing legacy payload pass statistics")
+            statistics = PassStatistics()
+            for record in payload_state.pop("_current_pass_records"):
+                statistics.add(record)
+            for suffix in ("cell_ids", "event_types", "livetime", "sigma_fraction", "counts_per_bin", "region"):
+                payload_state.pop("_current_pass_" + suffix, None)
+            payload_state["_pass_statistics"] = statistics
+            state["components"]["payload"] = payload_state
+        elif not isinstance(payload_state.get("_pass_statistics"), PassStatistics):
+            raise ValueError("Checkpoint is missing payload pass statistics")
+        pass_archive = payload_state.get("pass_science_records")
+        if state["version"] == 9:
+            if not isinstance(pass_archive, EventArchive):
+                raise ValueError("Checkpoint is missing completed-pass archive")
+            pass_archive.verify()
+        elif not isinstance(pass_archive, list):
+            raise ValueError("Checkpoint is missing legacy completed-pass records")
         saved_config = state["config"]
         config = config or saved_config
         a, b = asdict(config), asdict(saved_config)
@@ -2185,10 +2166,17 @@ class ANTARAScienceSimulator:
             if digest.hexdigest() != prefix["sha256"]:
                 raise ValueError("Checkpoint telemetry prefix has changed")
         sim = cls(config)
+        archive_destination = sim.payload.pass_science_records.path
         vars(sim).update(state["simulation"])
         for name, values in state["components"].items():
             if values is not None:
                 vars(getattr(sim, name)).update(values)
+        if isinstance(pass_archive, EventArchive):
+            sim.payload.pass_science_records = pass_archive.fork(archive_destination)
+        else:
+            sim.payload.pass_science_records = EventArchive(archive_destination)
+            for record in pass_archive:
+                sim.payload.pass_science_records.append(record)
         sim.current_attitude_command = AttitudeCommand(**state["command"]) if state["command"] else None
         sim.rng.bit_generator.state = state["rng_state"]
         # Rebuild propagation history up to the boundary, without changing ADCS.
@@ -5359,7 +5347,7 @@ class ANTARAScienceSimulator:
 
         self._at_step_boundary = False
         final_flushed_mb = 0.0
-        if self.payload._current_pass_records:
+        if self.payload._pass_statistics.count:
             if self.saa.current_pass is not None:
                 entry_t = float(self.saa.current_pass.get("entry_time_sec", final_time_sec))
             else:
@@ -5427,9 +5415,9 @@ class ANTARAScienceSimulator:
             index=False,
         )
 
-        proton_science_df = pd.DataFrame(self.payload.pass_science_records)
-        proton_science_df.to_csv(
-            results_path("science", f"{self.config.output_tag + '_' if self.config.output_tag else ''}ANTARA_Science_proton_passes.csv"), index=False
+        write_event_csv(
+            self.payload.pass_science_records,
+            results_path("science", f"{self.config.output_tag + '_' if self.config.output_tag else ''}ANTARA_Science_proton_passes.csv")
         )
 
         if not self.config.no_plots:

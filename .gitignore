@@ -26,4 +26,5 @@ data/orekit-data.zip
 miniconda.sh
 
 *.pkl
-OPENCODE*.md
+*.md
+./docs

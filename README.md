@@ -10,6 +10,8 @@ Flat `src/` files have been moved, not copied; shared utilities live in
 
 ## Current status
 
+See the [reconciled current backlog](docs/CURRENT_STATUS.md) and [final cleanup verification](docs/FINAL_CLEANUP_VERIFICATION.md) for the latest status.
+
 September 25 audit repairs change ADCS motion/torque accounting, payload flux response, detumble trial semantics, duration-weighted reporting, and supporting-study integration/energy accounting. See [changes, verification and limits](docs/AUDIT_REPAIRS_2026-09-25.md). Headless Science writes an exact scalar `*_ANTARA_Science_summary.json` without loading the full telemetry into memory. Historical results below retain their original scope; do not compare old payload counts or detumble capability estimates as though model semantics were unchanged.
 
 Documentation reviewed against the working tree on 2026-09-12. Science's annual preset has been verified through **60 hours**, not a full year: 17,758 telemetry rows, successful saturation → SAFE → SUN_POINTING recovery, and a maximum settled, non-held SUN_POINTING error of 4.999973° against the unchanged 5° limit. See the [runtime repair evidence](src/simulations/ditl/SIMULATION_RUNTIME_FIX_REPORT.md).
@@ -111,7 +113,7 @@ Explicit CLI values override scenario presets, which override global defaults. A
 
 The verified one-hour runs each produced 1,801 telemetry rows (both endpoints included), spanning `time_sec=0` to `3600` with two-second gaps. Wheel-capacity events can shorten a requested step (`wheel_event_split`); the horizon can also clip the final interval. Reusing an output tag replaces that scenario's outputs; preserve earlier results before rerunning.
 
-The [September 25 execution/payload repair](src/simulations/ditl/EXECUTION_PAYLOAD_REPAIR.md) unifies stepped and continuous runs and removes extra endpoint integration. The [September 28 operational checks](src/simulations/ditl/SHORT_OPERATIONAL_VERIFICATION.md) follow the [wheel-event repair](WHEEL_EVENT_REPAIR.md) and advance atomic checkpoints to **version 7**: nominal-frame and slew-energy corrections make older physics histories incompatible. Keep the original CSV alongside its checkpoint for separate-file resume. Telemetry exposes interval duration and end-state time, with a zero-duration terminal observation. Verification uses short runs, not annual simulations.
+The [September 25 execution/payload repair](src/simulations/ditl/EXECUTION_PAYLOAD_REPAIR.md) unifies stepped and continuous runs and removes extra endpoint integration. The [September 28 operational checks](src/simulations/ditl/SHORT_OPERATIONAL_VERIFICATION.md) follow the [wheel-event repair](WHEEL_EVENT_REPAIR.md) and established version-7 atomic checkpoints: nominal-frame and slew-energy corrections make version-6 and older histories incompatible. The [bounded pass-statistics update](src/simulations/ditl/BOUNDED_PASS_STATISTICS.md) now writes **version 9** and migrates version-7/8 payload state on load. Keep the original telemetry CSV and referenced `results/science/proton_passes_*.jsonl` files for separate-file resume. Completed proton passes are streamed to disk; other event histories are not yet bounded. Telemetry exposes interval duration and end-state time, with a zero-duration terminal observation. Verification uses short runs, not annual simulations.
 
 ### Physics backends and limitations
 
@@ -287,7 +289,7 @@ Expected locations (auto-detected):
 - `orekit-data/orekit-data-main/` (extracted, repository root)
 - `orekit-data.zip` (repository root)
 
-`src/simulations/helper/paths.py` currently searches only these two locations. Its optional `download_if_missing=True` branch writes to `data/orekit-data.zip` for that invocation, but subsequent default calls do not search that location. Science calls the default initializer and therefore needs data prepared beforehand. See [path behavior](src/simulations/helper/paths.md).
+`src/simulations/helper/paths.py` also searches `data/orekit-data.zip` and `data/orekit/orekit-data/orekit-data-main/`. Its optional `download_if_missing=True` branch writes to `data/orekit-data.zip`, which subsequent default calls can discover. Science calls the default initializer and therefore needs data prepared beforehand. See [path behavior](src/simulations/helper/paths.md).
 
 ---
 
@@ -332,51 +334,28 @@ The weekly `VALIDATION_REPORT.md` contains:
 
 ## Directory Structure Reference
 
-```
+```text
 ANTARA_CODES-main/
-├── src/
-│   ├── ANTARA_Science_Sim.py      # Main science simulator (24h-1yr)
-│   ├── simulations/              # Implementations; see docs/SIMULATION_LAYOUT.md
-│   ├── ANTARA_Master.py           # Legacy/superseded DITL (unchanged)
-│   ├── ANTARA_MCR.py              # Monte Carlo RAAN trade
-│   ├── ANTARA_avg.py              # Battery sizing MC
-│   ├── ANTARA_conops.py           # Fast CONOPS (analytical)
-│   ├── ANTARA_FINAL_POWERGEN.py   # RAAN power optimization
-│   ├── ANTARA_drag_finalconfig.py # Lifetime (final config)
-│   ├── ANTARA_drag_study.py       # Lifetime trade (4 configs)
-│   ├── TradeCase.py               # Analytical battery trade
-│   ├── ANTARA_pointing_budget.py  # GS pointing budget
-│   ├── ThermalSimulator.py        # 7-node thermal (RK4)
-│   ├── leop_detumble_mc.py        # Detumble MC capability
-│   ├── analyze_detumble_mc.py     # MC analysis & plots
-│   ├── compare_scenarios.py       # Scenario comparison
-│   ├── scenarios.py               # Scenario builder
-│   ├── fsm_spec.py                # FSM decision spec
-│   ├── plot_fsm_diagram.py        # FSM diagram generator
-│   ├── paths.py                   # I/O routing + Orekit init
-│   └── antara_models.py           # Orekit-free shared models
-├── tests/
-│   ├── test_fsm_spec_matches_code.py
-│   ├── test_physics_attitude.py
-│   ├── test_detumble_multiprocessing.py
-│   └── validation/
-│       ├── test_orbit_propagation.py
-│       ├── test_igrf_field.py
-│       ├── test_adcs_detumble_time.py
-│       ├── test_eps_power_budget.py
-│       ├── test_saa_flux_model.py
-│       └── test_comms_link_budget.py
-├── scripts/
-│   ├── verify_physics_dependencies.py
-│   └── generate_validation_report.py
+├── src/simulations/              # Implementations and colocated guides
+│   ├── ditl/                    # Science, presets, comparison, FSM diagrams
+│   ├── thermal/
+│   ├── conops/
+│   ├── power/
+│   ├── detumble/
+│   ├── orbit/
+│   ├── pointing/
+│   ├── helper/                  # Shared models, paths, numerics, telemetry
+│   └── legacy/                  # Superseded Master
+├── tests/                       # Regressions; validation/ reference checks
+├── scripts/                     # Backend checks, reports, runner installer
 ├── .github/workflows/ci.yml
-├── docs/                          # Maintained guides and generated FSM diagrams
-├── results/                       # Generated (gitignored)
-├── figures/                       # Generated (gitignored)
-├── data/                          # Orekit data (gitignored)
+├── docs/                        # Current status, cross-cutting reports, operations
+├── results/                     # Generated outputs
+├── figures/                     # Generated plots
+├── data/                        # Datasets
 ├── notebooks/
-├── archive/                       # Legacy code
-└── tmp/                           # Scratch
+├── archive/                     # Historical code
+└── tmp/                         # Scratch
 ```
 
 ---
@@ -387,7 +366,7 @@ ANTARA_CODES-main/
 2. Initialize the Orekit JVM before using Java-backed APIs; preserve each entrypoint's initialization order
 3. Quaternion convention: scalar-first [w,x,y,z], body-to-inertial
 4. Body frame (ICD Rev B): +X=RAM/payload, +Y=nadir/relay, +Z=sun-panel
-5. Run `python -m compileall -q src` and the layout parity tests to check both full source layouts
+5. Run `python -m compileall -q src` and `PYTHONPATH=src python -m pytest tests/test_*.py` to verify the single categorized layout
 
 ---
 

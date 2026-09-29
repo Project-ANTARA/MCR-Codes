@@ -197,7 +197,7 @@ jobs:
           python -m pytest tests/test_fsm_spec_matches_code.py -v --tb=short
 
       - name: Physics and attitude regression tests
-        run: python -m pytest tests/test_physics_attitude.py tests/test_scientific_integrity.py tests/test_execution_integrity.py tests/test_audit_repairs.py tests/test_slew_profile.py tests/test_wheel_events.py tests/test_telemetry_integrity.py tests/test_checkpoint_roundtrip.py tests/test_detumble_multiprocessing.py tests/test_scheduled_validation.py tests/test_simulation_layout.py tests/test_repository_hygiene.py -v --tb=short
+        run: python -m pytest tests/test_physics_attitude.py tests/test_scientific_integrity.py tests/test_execution_integrity.py tests/test_audit_repairs.py tests/test_slew_profile.py tests/test_wheel_events.py tests/test_telemetry_integrity.py tests/test_checkpoint_roundtrip.py tests/test_detumble_multiprocessing.py tests/test_scheduled_validation.py tests/test_simulation_layout.py tests/test_repository_hygiene.py tests/test_pass_statistics.py tests/test_event_archive.py -v --tb=short
 
       - name: Syntax check validation tests
         run: |
