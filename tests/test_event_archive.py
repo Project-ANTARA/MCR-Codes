@@ -4,7 +4,40 @@ import pickle
 import pandas as pd
 import pytest
 
-from simulations.helper.event_archive import EventArchive, write_event_csv
+from simulations.helper.event_archive import EventArchive, OpenEventArchive, event_sample, write_event_csv
+
+
+def test_open_event_checkpoint_and_indices(tmp_path):
+    events = OpenEventArchive(tmp_path / "events.jsonl")
+    events.append({"start_time_sec": 0., "end_time_sec": None, "duration_sec": 0.})
+    with pytest.raises(ValueError, match="Finalize"):
+        events.append({"start_time_sec": 1.})
+    snapshot = pickle.dumps(events)
+    events.finalize(0, 2.)
+    restored = pickle.loads(snapshot).fork(tmp_path / "branch.jsonl")
+    assert restored[0]["end_time_sec"] is None
+    restored.finalize(0, 3.)
+    assert events[0]["duration_sec"] == 2.
+    assert restored[0]["duration_sec"] == 3.
+    restored.append({"start_time_sec": 4., "end_time_sec": None})
+    assert len(restored) == 2
+    restored.finalize(1, 5.)
+    assert restored[-1]["duration_sec"] == 1.
+    with pytest.raises(ValueError, match="current open"):
+        restored.finalize(0, 6.)
+
+
+def test_event_display_sample_is_bounded_and_keeps_endpoints():
+    assert event_sample(iter(range(10001)), 10001, 5) == [0, 2500, 5000, 7500, 10000]
+
+
+def test_missing_coordinates_are_null_but_infinity_is_rejected(tmp_path):
+    archive = EventArchive(tmp_path / "events.jsonl")
+    archive.append({"exit_lat_deg": float("nan")})
+    assert archive[0] == {"exit_lat_deg": None}
+    with pytest.raises(ValueError):
+        archive.append({"exit_lat_deg": float("inf")})
+    assert len(archive) == 1
 
 
 def test_snapshot_forks_only_saved_prefix(tmp_path):

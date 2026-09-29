@@ -24,7 +24,10 @@ data/orekit-data.zip
 # Archives
 *.zip
 miniconda.sh
+orekit-data.zip
 
 *.pkl
 *.md
 ./docs
+
+antara_*.html

@@ -66,7 +66,7 @@ def test_legacy_checkpoint_rejected(config, tmp_path, version):
         science.ANTARAScienceSimulator.load_checkpoint(path, config)
 
 
-@pytest.mark.parametrize("version", [7, 8, 9])
+@pytest.mark.parametrize("version", [7, 8, 9, 10])
 def test_checkpoint_rejects_missing_pass_statistics(tmp_path, version):
     path = tmp_path / "incomplete.pkl"
     path.write_bytes(pickle.dumps({"version": version, "components": {"payload": {}}}))
@@ -92,6 +92,58 @@ def test_completed_pass_archive_checkpoint_branch(config, tmp_path):
     resumed.payload.pass_science_records.append({"pass_index": 3})
     assert sim.payload.pass_science_records[-1] == {"pass_index": 2}
     sim.payload.pass_science_records.path.write_text("corrupt")
+    with pytest.raises(ValueError, match="prefix"):
+        science.ANTARAScienceSimulator.load_checkpoint(path)
+
+
+def test_all_event_archives_resume_with_open_events(config, tmp_path):
+    sim = science.ANTARAScienceSimulator(replace(config, gs2_enabled=True))
+    for component, field, kind in sim._EVENT_ARCHIVES:
+        owner = getattr(sim, component)
+        if owner is None:
+            continue
+        archive = getattr(owner, field)
+        if kind is science.OpenEventArchive:
+            archive.append({"start_time_sec": 0., "end_time_sec": 1., "duration_sec": 1.})
+            archive.append({"start_time_sec": 2., "end_time_sec": None, "duration_sec": 0.})
+        else:
+            archive.append({"n": 1})
+    path = tmp_path / "all_events.pkl"
+    sim.save_checkpoint(path)
+    resumed = science.ANTARAScienceSimulator.load_checkpoint(path)
+    for component, field, kind in sim._EVENT_ARCHIVES:
+        owner = getattr(sim, component)
+        if owner is None:
+            continue
+        original = getattr(owner, field)
+        branch = getattr(getattr(resumed, component), field)
+        assert list(original) == list(branch)
+        if kind is science.OpenEventArchive:
+            original.finalize(1, 3.)
+            branch.finalize(1, 4.)
+            assert original[-1]["duration_sec"] == 1.
+            assert branch[-1]["duration_sec"] == 2.
+        else:
+            branch.append({"n": 2})
+            assert len(original) == 1
+
+
+@pytest.mark.parametrize("component,field,kind", science.ANTARAScienceSimulator._EVENT_ARCHIVES)
+def test_every_archive_prefix_is_verified(config, tmp_path, monkeypatch, component, field, kind):
+    sim = science.ANTARAScienceSimulator(replace(config, gs2_enabled=True))
+    owner = getattr(sim, component)
+    if owner is None:
+        pytest.skip("Optional second station disabled")
+    archive = getattr(owner, field)
+    record = {"start_time_sec": 0., "end_time_sec": 1.} if kind is science.OpenEventArchive else {"n": 1}
+    archive.append(record)
+    path = tmp_path / "corrupt_event.pkl"
+    sim.save_checkpoint(path)
+    source = archive.completed if kind is science.OpenEventArchive else archive
+    source.path.write_text("corrupt")
+    def unexpected_init(*args, **kwargs):
+        pytest.fail("Archive verification must precede construction/output creation")
+    monkeypatch.setattr(science.ANTARAScienceSimulator, "__init__", unexpected_init)
     with pytest.raises(ValueError, match="prefix"):
         science.ANTARAScienceSimulator.load_checkpoint(path)
 

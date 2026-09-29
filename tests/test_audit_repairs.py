@@ -217,7 +217,7 @@ def test_legacy_energy_balance_without_launching_study(name, target):
     assert eval(code, {}, dict(power_net=8., dt_hr=1., battery_eff=.8)) == pytest.approx(6.4)
 
 
-@pytest.mark.parametrize("checkpoint_version", [7, 8, 9])
+@pytest.mark.parametrize("checkpoint_version", [7, 8, 9, 10])
 def test_checkpoint_mid_detection_conserves_pending_packets(monkeypatch, tmp_path, checkpoint_version):
     from dataclasses import replace
     import pickle
@@ -248,10 +248,12 @@ def test_checkpoint_mid_detection_conserves_pending_packets(monkeypatch, tmp_pat
     sim.save_checkpoint(checkpoint)
     with checkpoint.open("rb") as stream:
         saved = pickle.load(stream)
-    assert saved["version"] == 9
-    if checkpoint_version < 9:
-        saved["components"]["payload"]["pass_science_records"] = list(
-            saved["components"]["payload"]["pass_science_records"])
+    assert saved["version"] == 10
+    if checkpoint_version < 10:
+        for component, field, _ in sim._EVENT_ARCHIVES:
+            owner = saved["components"][component]
+            if owner is not None and not (component == "payload" and checkpoint_version == 9):
+                owner[field] = list(owner[field])
     if checkpoint_version == 7:
         # Reconstruct the prior payload schema with the actual first sample.
         state = saved["components"]["payload"]
@@ -261,7 +263,7 @@ def test_checkpoint_mid_detection_conserves_pending_packets(monkeypatch, tmp_pat
                             ("livetime", "livetime_fraction"), ("sigma_fraction", "sigma_fraction"),
                             ("counts_per_bin", "counts_per_bin"), ("region", "region")):
             state["_current_pass_" + suffix] = [deepcopy(r[key]) for r in captured]
-    if checkpoint_version < 9:
+    if checkpoint_version < 10:
         saved["version"] = checkpoint_version
         with checkpoint.open("wb") as stream:
             pickle.dump(saved, stream)

@@ -7,7 +7,7 @@ This folder owns these implementations: `antara_models.py`, `fsm_spec.py`, `path
 - [antara_models](antara_models.md)
 - [paths](paths.md)
 - [Bounded payload pass statistics](../ditl/BOUNDED_PASS_STATISTICS.md)
-- [Completed proton-pass archive and checkpoint retention](../ditl/COMPLETED_PASS_ARCHIVE.md)
+- [Science event archives and checkpoint retention](../ditl/COMPLETED_PASS_ARCHIVE.md)
 
 Run entrypoints from the repository root using their full `src/simulations/helper/` path. Shared imports use `simulations.helper`. Some studies execute on import; do not import them merely to inspect the layout.
 

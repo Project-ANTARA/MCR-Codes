@@ -2,10 +2,26 @@
 import hashlib
 import json
 import os
+import math
 from copy import deepcopy
 from pathlib import Path
 
 import pandas as pd
+
+
+def _json_record(value):
+    """Represent missing floating samples as JSON null, never as zero.
+
+    Horizon-closed SAA events have unavailable exit coordinates. Infinity still
+    fails strict JSON serialization rather than being disguised as missing.
+    """
+    if isinstance(value, float) and math.isnan(value):
+        return None
+    if isinstance(value, dict):
+        return {key: _json_record(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_record(item) for item in value]
+    return value
 
 
 class EventArchive:
@@ -28,7 +44,7 @@ class EventArchive:
     def append(self, record):
         if not self._writable:
             raise RuntimeError("Fork a restored event archive before appending")
-        encoded = (json.dumps(record, allow_nan=False) + "\n").encode("utf-8")
+        encoded = (json.dumps(_json_record(record), allow_nan=False) + "\n").encode("utf-8")
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self.path.open("xb" if self.size == 0 else "r+b") as stream:
             stream.seek(0, os.SEEK_END)
@@ -132,8 +148,12 @@ class OpenEventArchive:
             yield dict(self.pending)
 
     def __getitem__(self, index):
+        if not isinstance(index, int):
+            raise TypeError("Event archive indices must be integers")
         if index < 0:
             index += len(self)
+        if index < 0 or index >= len(self):
+            raise IndexError(index)
         if self.pending is not None and index == len(self.completed):
             return dict(self.pending)
         return self.completed[index]

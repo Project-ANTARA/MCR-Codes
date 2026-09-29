@@ -17,6 +17,7 @@ import tempfile
 import threading
 import time
 import uuid
+import heapq
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -27,7 +28,7 @@ import pandas as pd
 from datetime import datetime, timedelta
 from simulations.helper.serialization import load_trusted_pickle
 from simulations.helper.pass_statistics import PassStatistics
-from simulations.helper.event_archive import EventArchive, write_event_csv
+from simulations.helper.event_archive import EventArchive, OpenEventArchive, event_sample, write_event_csv
 from simulations.helper.paths import figures_path, init_orekit_data, results_path
 from simulations.helper.telemetry_metrics import interval_weights, weighted_mean, RunningRange, streaming_summary, plotting_sample
 
@@ -1861,6 +1862,9 @@ class TelemetryLogger:
 
         if event_index < 0 or event_index >= len(self.slew_event_rows):
             return
+        if isinstance(self.slew_event_rows, OpenEventArchive):
+            self.slew_event_rows.finalize(event_index, end_time_sec)
+            return
         event = self.slew_event_rows[event_index]
         start_time_sec = float(event.get("start_time_sec", 0.0))
         event["end_time_sec"] = end_time_sec
@@ -1903,6 +1907,9 @@ class TelemetryLogger:
         """Finalize an open detumble event with the actual completion time."""
 
         if event_index < 0 or event_index >= len(self.detumble_event_rows):
+            return
+        if isinstance(self.detumble_event_rows, OpenEventArchive):
+            self.detumble_event_rows.finalize(event_index, end_time_sec)
             return
         event = self.detumble_event_rows[event_index]
         start_time_sec = float(event.get("start_time_sec", event.get("time_sec", 0.0)))
@@ -1984,6 +1991,11 @@ class ANTARAScienceSimulator:
         self.communications = CommunicationsModel(self.config)
         self.fsm = SpacecraftFSM(self.config)
         self.logger = TelemetryLogger()
+        for component, field, kind in self._EVENT_ARCHIVES:
+            owner = getattr(self, component)
+            if owner is not None:
+                setattr(owner, field, kind(results_path(
+                    "science", f"{component}_{field}_{uuid.uuid4().hex}.jsonl")))
 
         # Stage 0.3: Skip LEOP - direct state assignment to SUN_POINTING
         if skip_leop:
@@ -2037,6 +2049,18 @@ class ANTARAScienceSimulator:
 
         return self.initial_non_science_storage_mb + self.science_storage_mb
 
+    _EVENT_ARCHIVES = (
+        ("payload", "pass_science_records", EventArchive),
+        ("saa", "completed_passes", EventArchive),
+        ("ground_station", "completed_contacts", EventArchive),
+        ("ground_station_2", "completed_contacts", EventArchive),
+        ("fsm", "transition_history", EventArchive),
+        ("fsm", "rejected_transition_history", EventArchive),
+        ("logger", "rejected_transition_rows", EventArchive),
+        ("logger", "slew_event_rows", OpenEventArchive),
+        ("logger", "detumble_event_rows", OpenEventArchive),
+    )
+
     _CHECKPOINT_COMPONENTS = {
         "adcs": {"config"}, "eps": {"config"}, "fsm": {"config"},
         "payload": {"config", "proton_env", "layer_specs"},
@@ -2078,7 +2102,7 @@ class ANTARAScienceSimulator:
                 prefix = {"path": str(source), "size": size, "sha256": digest.hexdigest()}
             excluded = self._CHECKPOINT_RUNTIME | set(self._CHECKPOINT_COMPONENTS)
             state = {
-                "version": 9, "config": self.config,
+                "version": 10, "config": self.config,
                 "simulation": {k: v for k, v in vars(self).items() if k not in excluded},
                 "components": {
                     name: {k: v for k, v in vars(getattr(self, name)).items() if k not in omit}
@@ -2105,7 +2129,7 @@ class ANTARAScienceSimulator:
 
     @classmethod
     def load_checkpoint(cls, path, config=None):
-        """Restore version-7/8/9 state into separate telemetry and event archives.
+        """Restore version-7/8/9/10 state into separate telemetry and event archives.
 
         Load only checkpoints you trust: pickle can execute Python code.
         Old incomplete pickle/JSON checkpoints are rejected, not guessed at.
@@ -2113,8 +2137,8 @@ class ANTARAScienceSimulator:
         from dataclasses import asdict, replace
         with Path(path).open("rb") as stream:
             state = load_trusted_pickle(stream)
-        if not isinstance(state, dict) or state.get("version") not in (7, 8, 9):
-            raise ValueError("Unsupported/incomplete checkpoint; a version-7, version-8 or version-9 checkpoint is required (nominal frame and slew energy changed)")
+        if not isinstance(state, dict) or state.get("version") not in (7, 8, 9, 10):
+            raise ValueError("Unsupported/incomplete checkpoint; a version-7, version-8 or version-9 or version-10 checkpoint is required (nominal frame and slew energy changed)")
         payload_state = state.get("components", {}).get("payload")
         if not isinstance(payload_state, dict):
             raise ValueError("Checkpoint is missing payload pass statistics")
@@ -2131,13 +2155,18 @@ class ANTARAScienceSimulator:
             state["components"]["payload"] = payload_state
         elif not isinstance(payload_state.get("_pass_statistics"), PassStatistics):
             raise ValueError("Checkpoint is missing payload pass statistics")
-        pass_archive = payload_state.get("pass_science_records")
-        if state["version"] == 9:
-            if not isinstance(pass_archive, EventArchive):
-                raise ValueError("Checkpoint is missing completed-pass archive")
-            pass_archive.verify()
-        elif not isinstance(pass_archive, list):
-            raise ValueError("Checkpoint is missing legacy completed-pass records")
+        for component, field, kind in cls._EVENT_ARCHIVES:
+            values = state["components"].get(component)
+            if component == "ground_station_2" and values is None:
+                continue
+            archive = values.get(field) if isinstance(values, dict) else None
+            archived = state["version"] == 10 or (state["version"] == 9 and component == "payload")
+            if archived:
+                if not isinstance(archive, kind):
+                    raise ValueError(f"Checkpoint is missing event archive: {component}.{field}")
+                archive.verify()
+            elif not isinstance(archive, list):
+                raise ValueError(f"Checkpoint is missing legacy event records: {component}.{field}")
         saved_config = state["config"]
         config = config or saved_config
         a, b = asdict(config), asdict(saved_config)
@@ -2166,17 +2195,23 @@ class ANTARAScienceSimulator:
             if digest.hexdigest() != prefix["sha256"]:
                 raise ValueError("Checkpoint telemetry prefix has changed")
         sim = cls(config)
-        archive_destination = sim.payload.pass_science_records.path
         vars(sim).update(state["simulation"])
         for name, values in state["components"].items():
             if values is not None:
                 vars(getattr(sim, name)).update(values)
-        if isinstance(pass_archive, EventArchive):
-            sim.payload.pass_science_records = pass_archive.fork(archive_destination)
-        else:
-            sim.payload.pass_science_records = EventArchive(archive_destination)
-            for record in pass_archive:
-                sim.payload.pass_science_records.append(record)
+        for component, field, kind in cls._EVENT_ARCHIVES:
+            owner = getattr(sim, component)
+            if owner is None:
+                continue
+            source = getattr(owner, field)
+            destination_archive = results_path("science", f"{component}_{field}_{uuid.uuid4().hex}.jsonl")
+            if isinstance(source, (EventArchive, OpenEventArchive)):
+                target = source.fork(destination_archive)
+            else:
+                target = kind(destination_archive)
+                for record in source:
+                    target.append(record)
+            setattr(owner, field, target)
         sim.current_attitude_command = AttitudeCommand(**state["command"]) if state["command"] else None
         sim.rng.bit_generator.state = state["rng_state"]
         # Rebuild propagation history up to the boundary, without changing ADCS.
@@ -3995,29 +4030,39 @@ class ANTARAScienceSimulator:
             self.logger.finalize_detumble_event(self.active_detumble_event_index, final_time_sec)
             self.active_detumble_event_index = None
 
-        # FIX Bugs 5+13: merge GS2 contacts into the gs_contacts list.
-        # Previously only self.ground_station.completed_contacts (primary India station)
-        # was passed to build_dataframes(), making all Svalbard contacts invisible.
-        # All actual downlink (0.0638 MB) occurred through GS2 but showed as phantom
-        # in gs_contacts.csv (downlinked_mb=0) while real contacts at T+11.28hr and
-        # T+23.23hr appeared genuine but had zero bytes (data already gone via GS2).
-        all_contacts = list(self.ground_station.completed_contacts)
-        if self.ground_station_2 is not None:
-            for c in self.ground_station_2.completed_contacts:
-                labelled = dict(c)
-                labelled["station"] = "GS2_Svalbard"
-                all_contacts.append(labelled)
-        # Sort combined contact list by AOS time
-        all_contacts.sort(key=lambda c: c.get("aos_time_sec", 0.0))
-        # Label primary contacts for traceability
-        for c in self.ground_station.completed_contacts:
-            c.setdefault("station", "GS1_India")
+        def contacts(station, label):
+            if station is not None:
+                for record in station.completed_contacts:
+                    yield dict(record, station=label)
 
-        return self.logger.build_dataframes(
-            self.saa.completed_passes,
-            all_contacts,
-            self.fsm.transition_history,
-        )
+        contact_count = len(self.ground_station.completed_contacts)
+        if self.ground_station_2 is not None:
+            contact_count += len(self.ground_station_2.completed_contacts)
+
+        def merged_contacts():
+            return heapq.merge(contacts(self.ground_station, "GS1_India"),
+                              contacts(self.ground_station_2, "GS2_Svalbard"),
+                              key=lambda row: row["aos_time_sec"])
+
+        streams = [
+            ("saa_passes", self.saa.completed_passes),
+            ("mode_transitions", self.fsm.transition_history),
+            ("slew_events", self.logger.slew_event_rows),
+            ("detumble_events", self.logger.detumble_event_rows),
+            ("rejected_transitions", self.logger.rejected_transition_rows),
+        ]
+        prefix = self.config.output_tag + "_" if self.config.output_tag else ""
+        frames = {}
+        self._event_display_sampled = contact_count > 5000
+        for name, records in streams:
+            write_event_csv(records, results_path("science", f"{prefix}ANTARA_Science_{name}.csv"))
+            self._event_display_sampled |= len(records) > 5000
+            frames[name] = pd.DataFrame(event_sample(records, len(records))) if not self.config.no_plots else pd.DataFrame()
+        write_event_csv(merged_contacts(), results_path("science", f"{prefix}ANTARA_Science_gs_contacts.csv"))
+        contact_frame = pd.DataFrame(event_sample(merged_contacts(), contact_count)) if not self.config.no_plots else pd.DataFrame()
+        return (pd.DataFrame(self.logger.telemetry_rows), frames["saa_passes"],
+                contact_frame, frames["mode_transitions"], frames["slew_events"],
+                frames["detumble_events"])
 
     def _plot_results(
         self,
@@ -4372,7 +4417,7 @@ class ANTARAScienceSimulator:
 
         axis4 = figure.add_subplot(grid[1, 1])
         axis4.set_title("Panel 4: Mean EW Asymmetry Factor per SAA Pass")
-        pass_records = self.payload.pass_science_records
+        pass_records = event_sample(self.payload.pass_science_records, len(self.payload.pass_science_records))
         if pass_records:
             pass_indices = [r["pass_index"] for r in pass_records]
             mean_ew = [r["mean_ew_factor"] for r in pass_records]
@@ -5271,6 +5316,12 @@ class ANTARAScienceSimulator:
                     if current_mode == "SLEWING":
                         if requested_mode == "SAFE":
                             transitioned = self.fsm.transition(requested_mode, reason)
+                            if transitioned and self.active_slew_event_index is not None:
+                                # This acquisition ended by abort, not arrival.
+                                # Close its event now so a later acquisition
+                                # cannot orphan or overwrite the open record.
+                                self.logger.finalize_slew_event(self.active_slew_event_index, time_sec)
+                                self.active_slew_event_index = None
                         else:
                             transitioned = False
                     elif current_mode == "SAFE" and requested_mode == "SUN_POINTING":
@@ -5405,16 +5456,6 @@ class ANTARAScienceSimulator:
 
         # Incremental telemetry is already complete. Rewriting via pandas can
         # change float formatting in its prefix and invalidate saved checkpoints.
-        saa_passes_df.to_csv(results_path("science", f"{self.config.output_tag + '_' if self.config.output_tag else ''}ANTARA_Science_saa_passes.csv"), index=False)
-        gs_contacts_df.to_csv(results_path("science", f"{self.config.output_tag + '_' if self.config.output_tag else ''}ANTARA_Science_gs_contacts.csv"), index=False)
-        mode_transitions_df.to_csv(results_path("science", f"{self.config.output_tag + '_' if self.config.output_tag else ''}ANTARA_Science_mode_transitions.csv"), index=False)
-        slew_events_df.to_csv(results_path("science", f"{self.config.output_tag + '_' if self.config.output_tag else ''}ANTARA_Science_slew_events.csv"), index=False)
-        detumble_events_df.to_csv(results_path("science", f"{self.config.output_tag + '_' if self.config.output_tag else ''}ANTARA_Science_detumble_events.csv"), index=False)
-        pd.DataFrame(self.logger.rejected_transition_rows).to_csv(
-            results_path("science", f"{self.config.output_tag + '_' if self.config.output_tag else ''}ANTARA_Science_rejected_transitions.csv"),
-            index=False,
-        )
-
         write_event_csv(
             self.payload.pass_science_records,
             results_path("science", f"{self.config.output_tag + '_' if self.config.output_tag else ''}ANTARA_Science_proton_passes.csv")
@@ -5424,7 +5465,9 @@ class ANTARAScienceSimulator:
             self._plot_results(telemetry_df, saa_passes_df, gs_contacts_df, slew_events_df)
             self._plot_science_results(telemetry_df, saa_passes_df)
             self._plot_attitude_diagnostics(telemetry_df)
-        if not self.config.no_plots and not telemetry_sampled:
+        if not self.config.no_plots and (self._event_display_sampled or len(self.payload.pass_science_records) > 5000):
+            print("Event figures use at most 5000 display records per stream; complete event CSVs are authoritative.")
+        if not self.config.no_plots and not telemetry_sampled and not self._event_display_sampled and len(self.payload.pass_science_records) <= 5000:
             self._print_summary(
                 telemetry_df, saa_passes_df, gs_contacts_df,
                 mode_transitions_df, slew_events_df,

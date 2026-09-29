@@ -22,6 +22,37 @@ def telemetry(tmp_path, tag):
     return pd.read_csv(tmp_path / f"{tag}_ANTARA_Science_telemetry.csv")
 
 
+def test_streamed_contact_export_keeps_labels_and_tie_order(config, tmp_path):
+    sim = science.ANTARAScienceSimulator(replace(config, gs2_enabled=True))
+    for station, times in ((sim.ground_station, [1., 3.]), (sim.ground_station_2, [1., 2.])):
+        assert station is not None
+        for t in times:
+            station.completed_contacts.append({"aos_time_sec": t, "downlinked_mb": t})
+    frames = sim._finalise_event_logs(6., sim.start_date.shiftedBy(6.))
+    assert all(frame.empty for frame in frames)
+    result = pd.read_csv(tmp_path / "reference_ANTARA_Science_gs_contacts.csv")
+    assert list(result.aos_time_sec) == [1., 1., 2., 3.]
+    assert list(result.station) == ["GS1_India", "GS2_Svalbard", "GS2_Svalbard", "GS1_India"]
+    assert result.downlinked_mb.sum() == 7.
+
+
+def test_safe_abort_closes_slew_before_next_acquisition(config, monkeypatch):
+    sim = science.ANTARAScienceSimulator(config, skip_leop=True)
+    orbit = sim._build_orbit_state(sim._propagate_state(sim.start_date), 0.)
+    assert sim._begin_slew_transition("SUN_POINTING", "DETECTION", "test", orbit,
+                                      True, sim.eps.battery_wh, False, 0.)
+    sim.slew_end_time_sec = 1000.
+    monkeypatch.setattr(sim.fsm, "evaluate", lambda *args: ("SAFE", "test abort"))
+    sim.run_steps(1)
+    assert sim.fsm.current_mode == "SAFE"
+    assert sim.active_slew_event_index is None
+    assert sim.logger.slew_event_rows[0]["end_time_sec"] is not None
+    assert sim._begin_slew_transition("SAFE", "SUN_POINTING", "retry", orbit,
+                                      True, sim.eps.battery_wh, False, sim.time_sec)
+    assert sim.active_slew_event_index == 1
+    assert len(sim.logger.slew_event_rows) == 2
+
+
 def test_peak_rejection_precedes_payload_and_eps(config, monkeypatch, tmp_path):
     sim = science.ANTARAScienceSimulator(config, skip_leop=True)
     def guidance(*args, **kwargs):
