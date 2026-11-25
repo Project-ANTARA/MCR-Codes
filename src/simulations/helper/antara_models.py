@@ -80,15 +80,15 @@ class MissionConfig:
     progress_report_interval_sec: float = 180.0
     telemetry_flush_interval_hours: float = 6.0
     output_tag: Optional[str] = None
-    start_year: int = 2000
-    start_month: int = 3
+    start_year: int = 2029
+    start_month: int = 1
     start_day: int = 1
 
     # Orbit definition
     altitude_m: float = 600_000.0
     inclination_deg: float = 97.6
     eccentricity: float = 0.001
-    raan_deg: float = 15.0
+    raan_deg: float = 30.0
     arg_perigee_deg: float = 0.0
     true_anomaly_deg: float = 0.0
 

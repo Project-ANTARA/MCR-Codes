@@ -104,10 +104,10 @@ RAAN_VALUES = [
 ]
 
 ALTITUDE = 600000.0
-INCLINATION = 97.4
+INCLINATION = 97.6
 ECC = 0.001
 
-MASS = 4.0
+MASS = 3.0
 
 CD_BASE = 2.2
 CR_BASE = 1.2
@@ -535,7 +535,7 @@ for RAAN in RAAN_VALUES:
         )
 
         start_date = AbsoluteDate(
-            2026,
+            2029,
             1,
             1,
             0,

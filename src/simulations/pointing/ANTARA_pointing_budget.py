@@ -27,7 +27,7 @@ import matplotlib.pyplot as plt
 # =============================
 
 utc = TimeScalesFactory.getUTC()
-start_date = AbsoluteDate(2026, 1, 1, 12, 0, 0.0, utc)
+start_date = AbsoluteDate(2029, 1, 1, 12, 0, 0.0, utc)
 
 inertialFrame = FramesFactory.getEME2000()
 earthFrame = FramesFactory.getITRF(IERSConventions.IERS_2010, True)
@@ -39,12 +39,12 @@ earth = OneAxisEllipsoid(
 )
 
 # =============================
-# 2️⃣ ORBIT (575 km SSO)
+# 2️⃣ ORBIT (600 km SSO)
 # =============================
 
 a = Constants.WGS84_EARTH_EQUATORIAL_RADIUS + 600000.0
 e = 0.0
-i = radians(97.4)
+i = radians(97.6)
 raan = radians(0.0)
 argPerigee = 0.0
 meanAnomaly = 0.0
@@ -81,8 +81,8 @@ stationFrame = TopocentricFrame(earth, stationPoint, "GS")
 # 5️⃣ PROPAGATION LOOP
 # =============================
 
-simulation_duration = 86400.0   # 1 day
-step = 10.0
+simulation_duration = 365*86400.0   # 1 day
+step = 30.0
 
 currentDate = start_date
 
@@ -96,7 +96,7 @@ total_access_time = 0.0
 pass_durations = []
 max_off_boresight = 0.0
 
-elevation_mask = 10.0  # degrees
+elevation_mask = 15.0  # degrees
 
 while currentDate.durationFrom(start_date) < simulation_duration:
 

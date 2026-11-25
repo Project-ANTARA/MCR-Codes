@@ -7,12 +7,13 @@ __pycache__/
 htmlcov/
 .venv/
 venv/
-
+tmp/
 # VSCode
 .vscode/
 
 # Generated simulation outputs
 results/
+results_2029_mcr/
 
 # Orekit data
 data/orekit/
@@ -29,5 +30,7 @@ orekit-data.zip
 *.pkl
 *.md
 ./docs
-
+build/
 antara_*.html
+
+src/antara_simulations.egg_info

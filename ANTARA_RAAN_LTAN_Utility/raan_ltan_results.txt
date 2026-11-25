@@ -1,0 +1,78 @@
+============================================================
+         ANTARA RAAN TO LTAN CONVERTER
+============================================================
+
+MISSION PARAMETERS
+------------------------------------------------------------
+Epoch (UTC)          : 2029-01-01 00:00:00
+Orbit altitude       : 600.0 km
+Inclination          : 97.6000 deg
+Eccentricity         : 0.0000
+Orbit type           : Circular SSO
+Launch site          : Sriharikota, India
+Launch provider      : TBD
+Ground station       : BITS Goa, India
+
+SOLAR REFERENCE
+------------------------------------------------------------
+Julian Date          : 2462137.500000
+Julian Centuries     : 0.290007
+Solar RA (mean)      : 281.800237 deg
+
+RAAN TO LTAN RESULTS
+------------------------------------------------------------
+ Original RAAN   Normalized RAAN   LTAN (decimal)  LTAN (HH:MM:SS)
+------------------------------------------------------------
+        0.0000            0.0000        17.213318        17:12:48
+       15.0000           15.0000        18.213318        18:12:48
+       30.0000           30.0000        19.213318        19:12:48
+       45.0000           45.0000        20.213318        20:12:48
+       60.0000           60.0000        21.213318        21:12:48
+       90.0000           90.0000        23.213318        23:12:48
+      120.0000          120.0000         1.213318        01:12:48
+      180.0000          180.0000         5.213318        05:12:48
+      240.0000          240.0000         9.213318        09:12:48
+      270.0000          270.0000        11.213318        11:12:48
+      300.0000          300.0000        13.213318        13:12:48
+      359.0000          359.0000        17.146651        17:08:48
+      -10.0000          350.0000        16.546651        16:32:48
+      370.0000           10.0000        17.879984        17:52:48
+      720.5000            0.5000        17.246651        17:14:48
+============================================================
+
+SCIENTIFIC ASSUMPTIONS AND LIMITATIONS
+------------------------------------------------------------
+1. This utility performs an INSTANTANEOUS RAAN-to-LTAN conversion
+   at the specified epoch. It does NOT propagate the orbit.
+2. It does NOT calculate J2 nodal precession or future LTAN drift.
+3. It does NOT calculate launch windows.
+4. It does NOT calculate launch azimuth or launch vehicle injection
+   parameters.
+5. It does NOT calculate ground-station visibility or communication
+   windows.
+6. The BITS Goa ground station does NOT affect the RAAN-to-LTAN
+   conversion.
+7. The launch site and launch provider do NOT affect the conversion
+   once the orbit and epoch are specified.
+8. Orbit altitude and inclination are recorded for mission
+   traceability but are NOT direct inputs to this instantaneous
+   conversion.
+9. The assumed epoch is the reference epoch of the supplied RAAN
+   values. It is NOT necessarily the actual launch or orbital
+   insertion epoch.
+10. If the actual orbital insertion time is unknown, the default
+    epoch must be treated as PROVISIONAL.
+11. The current 97.6° inclination is retained as an ANTARA working
+    assumption. The script does NOT silently modify it or claim
+    that it guarantees a perfectly Sun-synchronous orbit.
+12. The result is dependent on the adopted solar-coordinate
+    convention. Mean LTAN and apparent solar time are NOT
+    interchangeable.
+13. The astronomical model (mean-Sun, low-precision) should be
+    validated against a trusted ephemeris (e.g., JPL DE430, SPICE)
+    before using results for final PDR/CDR mission decisions.
+14. CONVERSION EQUATION: LTAN = [12 + (Ω - α☉)/15] mod 24
+    where Ω = RAAN (deg), α☉ = Solar RA (deg), LTAN in hours.
+15. SOLAR MODEL: Mean-Sun model per Meeus 'Astronomical Algorithms'
+    (Ch. 25). Uses mean longitude, mean anomaly, equation of
+    center, and mean obliquity. Expected accuracy ~0.01 deg.
